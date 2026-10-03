@@ -4,16 +4,17 @@ import asyncio
 import json
 import math
 import re
-from statistics import median
+import shutil
 from pathlib import Path
 from typing import Any
 
-from PIL import Image, ImageDraw
+from PIL import Image
 
 from app.config import Settings
 from app.models import BBox, DocumentLayout, LayoutBlock, PageLayout
 from app.services.costs import estimate_cost
 from app.services.crops import materialize_crops
+from app.services.figure_extraction import background_color as _background_color, extract_figures, residual_image
 from app.services.grouping import build_processing_units
 from app.services.input_pages import render_inputs
 from app.services.jev_router import JevRouter
@@ -91,41 +92,11 @@ def _qwen_words_to_blocks(words: list[dict[str, Any]], page_index: int) -> list[
     return blocks
 
 
-def _background_color(image: Image.Image) -> tuple[int, int, int]:
-    """Estimate neutral paper, excluding ink and colored corner highlights."""
-    rgb = image.convert("RGB")
-    # Sample original pixels; averaging a squared-paper grid would tint its white
-    # background gray just as highlighted corners previously tinted it yellow.
-    rgb = rgb.resize((min(160, rgb.width), min(160, rgb.height)), Image.Resampling.NEAREST)
-    pixels = list(rgb.getdata())
-    neutral = [pixel for pixel in pixels if min(pixel) >= 180 and max(pixel) - min(pixel) <= 20]
-    if not neutral:
-        cutoff = sorted(sum(pixel) for pixel in pixels)[int((len(pixels) - 1) * .8)]
-        neutral = [pixel for pixel in pixels if sum(pixel) >= cutoff]
-    return tuple(int(median(pixel[channel] for pixel in neutral)) for channel in range(3))
-
-
 def _make_residual_page(page_path: Path, blocks: list[LayoutBlock], out_path: Path) -> None:
-    """Preserve drawings/figures while removing OCR text/math regions.
-
-    This is deliberately deterministic and light enough for Render Free.
-    """
+    """Create a diagnostic residual; it is never a rendered page background."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with Image.open(page_path) as src:
-        image = src.convert("RGB")
-        bg = _background_color(image)
-        draw = ImageDraw.Draw(image)
-        pad = max(3, round(min(image.size) * 0.0025))
-        for block in blocks:
-            if block.category not in {"text", "math"}:
-                continue
-            if len(block.polygon) == 8:
-                points = list(zip(block.polygon[::2], block.polygon[1::2]))
-                draw.polygon(points, fill=bg)
-                draw.line([*points, points[0]], fill=bg, width=pad * 2 + 1, joint="curve")
-                continue
-            box = block.bbox.expand(pad, image.width, image.height)
-            draw.rectangle((int(box.x1), int(box.y1), int(box.x2), int(box.y2)), fill=bg)
+        image = residual_image(src, blocks)
         image.save(out_path, format="PNG", optimize=True)
 
 
@@ -239,43 +210,30 @@ class Hand2TeXPipeline:
         layout_usage_events.append({"provider": "qwen_ocr", **(located.usage or {})})
 
         if not blocks:
-            # Preserve the original, but do not claim successful text recognition.
+            # Layout failure must not silently replace transcription with a scan.
+            # Decode the page once as prose and attach the source separately.
             detector_errors.append({
                 "page": page.index, "stage": "qwen-layout",
-                "error": "0 usable boxes; original page preserved without transcription",
+                "error": "0 usable boxes; full-page text OCR fallback, with original source attached separately",
             })
             blocks = [
                 LayoutBlock(
                     id=f"p{page.index:04d}_fullpage",
                     page=page.index,
-                    category="figure",
-                    source_label="whole_page_no_text",
+                    category="text",
+                    source_label="whole_page_ocr_fallback",
                     score=0.0,
                     bbox=BBox(0, 0, page.width, page.height),
                     provider="qwen-vl-ocr-layout",
                 )
             ]
             if trace:
-                trace.record_parsed(located.words_info, blocks, 0.0, "whole_page_no_text")
+                trace.record_parsed(located.words_info, blocks, 0.0, "whole_page_ocr_fallback")
             return blocks, 0.0, "qwen-vl-ocr-layout"
 
-        # Preserve every non-recognized pixel as a residual background. This keeps
-        # drawings/diagrams without requiring a heavy local detector on Render Free.
-        blocks.insert(
-            0,
-            LayoutBlock(
-                id=f"p{page.index:04d}_residual",
-                page=page.index,
-                category="figure",
-                source_label="residual_background",
-                score=1.0,
-                bbox=BBox(0, 0, page.width, page.height),
-                provider="qwen-residual",
-            ),
-        )
         if trace:
             trace.record_parsed(located.words_info, blocks, 0.95)
-        return blocks, 0.95, "qwen-vl-ocr-layout+residual"
+        return blocks, 0.95, "qwen-vl-ocr-layout"
 
     async def run(self, input_paths: list[Path], work_dir: Path, title: str, include_debug: bool = False) -> dict[str, Any]:
         pages_dir = work_dir / "pages"
@@ -293,6 +251,7 @@ class Hand2TeXPipeline:
         layouts: list[PageLayout] = []
         raw_rescues: list[dict[str, Any]] = []
         detector_errors: list[dict[str, Any]] = []
+        content_warnings: list[dict[str, Any]] = []
         layout_usage_events: list[dict[str, Any]] = []
         mistral_pages = 0
 
@@ -333,6 +292,18 @@ class Hand2TeXPipeline:
                     blocks, quality, detector_name = await self._layout_qwen(page, detector_errors, layout_usage_events, diagnostics)
                     rescued_layout = True
 
+            page_crop_dir = crops_dir / f"page_{page.index:04d}"
+            figure_crops: dict[str, str] = {}
+            if detector_name.startswith("qwen-vl-ocr-layout") and quality > 0:
+                figures = extract_figures(page.path, blocks, page_crop_dir / "illustrations", page.index)
+                blocks.extend(figures.blocks)
+                figure_crops = figures.crops
+                content_warnings.extend({"page": page.index, "stage": "source-fragments", "warning": warning} for warning in figures.warnings)
+                if diagnostics:
+                    trace = next((trace for trace in diagnostics.pages if trace.parsed["page"] == page.index), None)
+                    if trace:
+                        trace.record_parsed(trace.parsed["words_info"], blocks, quality, trace.parsed["fallback"])
+
             pl = PageLayout(
                 index=page.index,
                 width_px=page.width,
@@ -344,16 +315,11 @@ class Hand2TeXPipeline:
                 rescued_layout=rescued_layout,
             )
             pl.units = build_processing_units(blocks, page.width, page.height, page.index)
-            page_crop_dir = crops_dir / f"page_{page.index:04d}"
             materialize_crops(pl, page_crop_dir)
-
-            residual_block_id = f"p{page.index:04d}_residual"
-            residual_unit = next((u for u in pl.units if residual_block_id in u.member_ids), None)
-            if residual_unit is not None:
-                residual_path = page_crop_dir / f"{residual_unit.id}_residual.png"
-                text_blocks = [b for b in blocks if b.id != residual_block_id]
-                _make_residual_page(page.path, text_blocks, residual_path)
-                residual_unit.crop_path = str(residual_path)
+            for unit in pl.units:
+                source_id = next((identifier for identifier in unit.member_ids if identifier in figure_crops), None)
+                if source_id:
+                    unit.crop_path = figure_crops[source_id]
 
             layouts.append(pl)
 
@@ -361,12 +327,22 @@ class Hand2TeXPipeline:
         semaphore = asyncio.Semaphore(max(1, self.settings.qwen_concurrency))
         await asyncio.gather(*(self._decode_unit(unit, semaphore) for p in layout.pages for unit in p.units))
 
-        tex_path = build_tex(layout, result_dir, title)
-
         all_units = [u for p in layout.pages for u in p.units]
+        missing_units = [unit for unit in all_units if unit.category in {"text", "math", "table"} and not unit.decoded.strip()]
+        content_warnings.extend({"page": unit.page, "stage": "ocr", "unit": unit.id, "warning": "This content region could not be transcribed; original source attached separately."} for unit in missing_units)
+        source_pages = []
+        warned_pages = {item["page"] for item in content_warnings} | {page.index for page in layout.pages if page.detector_quality == 0}
+        for page in pages:
+            if page.index in warned_pages:
+                source_path = result_dir / "sources" / f"page_{page.index:04d}.png"
+                source_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(page.path, source_path)
+                source_pages.append({"page": page.index, "path": source_path.relative_to(result_dir).as_posix(), "purpose": "original source for review; excluded from typeset document"})
+
+        tex_path = build_tex(layout, result_dir, title)
         manifest = {
             "version": DEBUG_VERSION,
-            "status": "warning" if any(p.detector_quality == 0.0 for p in layout.pages) else "ok",
+            "status": "warning" if warned_pages else "ok",
             "title": title,
             "pages": len(layout.pages),
             "detectors": [
@@ -390,7 +366,10 @@ class Hand2TeXPipeline:
             ],
             "cost_estimate": estimate_cost(self.settings, all_units, mistral_pages, layout_usage_events),
             "detector_errors": detector_errors,
-            "architecture": "TrustedRouter Qwen-VL-OCR layout -> residual-preservation -> grouped-crops -> category OCR -> Qwen3.8 Max rescue -> deterministic absolute-layout LaTeX",
+            "content_warnings": content_warnings,
+            "source_pages": source_pages,
+            "output_mode": "flow-document",
+            "architecture": "TrustedRouter Qwen-VL-OCR layout -> compact grouped OCR crops and local illustration crops -> category OCR -> Qwen3.8 Max rescue -> reading order -> standard flowing LaTeX document",
         }
         (result_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
         (result_dir / "layout.json").write_text(json.dumps(layout.to_jsonable(work_dir), ensure_ascii=False, indent=2), encoding="utf-8")

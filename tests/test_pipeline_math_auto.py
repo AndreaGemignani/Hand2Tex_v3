@@ -77,8 +77,8 @@ async def test_position_only_math_is_promoted_on_valid_equal_scores(tmp_path, te
     tex_path = build_tex(DocumentLayout([page]), tmp_path / "result", "Math promotion")
     tex = tex_path.read_text(encoding="utf-8")
     assert math_result in tex
-    assert r"\displaystyle" in tex
-    assert r"\resizebox" in tex
+    assert "\\[\n" + math_result + "\n\\]" in tex
+    assert r"\resizebox" not in tex
 
 
 @pytest.mark.asyncio

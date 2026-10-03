@@ -63,8 +63,9 @@ def test_text_in_figure_envelope_but_outside_its_polygon_is_preserved():
     assert set(members(units)) == {"figure", "corner-text"}
 
 
-def test_residual_background_never_suppresses_text():
-    residual = LayoutBlock("residual", 0, "figure", "residual_background", 1, BBox(0, 0, 1000, 1400))
+@pytest.mark.parametrize("label", ["residual_background", "local_source_fragment"])
+def test_source_fragment_envelope_never_suppresses_text(label):
+    residual = LayoutBlock("residual", 0, "figure", label, 1, BBox(0, 0, 1000, 1400))
     text = line("text", 200)
     units = build_processing_units([residual, text], 1000, 1400, 0)
     assert set(members(units)) == {"residual", "text"}

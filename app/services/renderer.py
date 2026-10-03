@@ -1,81 +1,24 @@
 from __future__ import annotations
 
-import json
 import re
 import shutil
 import subprocess
 from pathlib import Path
 
-from app.models import DocumentLayout, ProcessingUnit
+from app.models import DocumentLayout, PageLayout, ProcessingUnit
+from app.services.document_structure import reading_order, starts_paragraph
 from app.services.table_latex import to_latex as table_to_latex
-
-A4_W_MM = 210.0
-A4_H_MM = 297.0
 
 _TEXT_MATH = re.compile(
     r"(?<![\\$])\$\$((?:\\.|[^$])*)\$\$|(?<![\\$])\$(?!\$)((?:\\.|[^$])*)\$(?!\d)"
     r"|(?<!\\)\\\((.*?)\\\)|(?<!\\)\\\[(.*?)\\\]", re.S,
 )
-
-# Measure at a native Computer Modern size, then shrink graphics uniformly.
-# This does not need an extra font package or substitute arbitrary font sizes.
-# Tokens are measured separately so an unbreakable word or inline formula cannot
-# protrude from the minipage before the whole paragraph is fitted vertically.
-FIT_MACROS = r"""\newsavebox{\HandFitBoxRegister}
-\newsavebox{\HandTextBoxRegister}
-\newsavebox{\HandTokenBoxRegister}
-\newcommand{\HandFitBox}[3]{%
-  \begingroup
-  \sbox{\HandFitBoxRegister}{#3}%
-  \ifdim\wd\HandFitBoxRegister>#1\relax
-    \sbox{\HandFitBoxRegister}{\resizebox{#1}{!}{\usebox{\HandFitBoxRegister}}}%
-  \fi
-  \ifdim\dimexpr\ht\HandFitBoxRegister+\dp\HandFitBoxRegister\relax>#2\relax
-    \resizebox*{!}{#2}{\usebox{\HandFitBoxRegister}}%
-  \else
-    \usebox{\HandFitBoxRegister}%
-  \fi
-  \endgroup
-}
-\newcommand{\HandTextToken}[2]{%
-  \begingroup
-  \sbox{\HandTokenBoxRegister}{#2}%
-  \ifdim\wd\HandTokenBoxRegister>#1\relax
-    \resizebox{#1}{!}{\usebox{\HandTokenBoxRegister}}%
-  \else
-    \usebox{\HandTokenBoxRegister}%
-  \fi
-  \endgroup
-}
-\def\HandWordStop{\HandEndWords}
-\def\HandTextWords#1 {%
-  \def\HandCurrentWord{#1}%
-  \ifx\HandCurrentWord\HandWordStop
-    \let\HandNextWord\relax
-  \else
-    \HandTextToken{\HandTextLimit}{#1}\space
-    \let\HandNextWord\HandTextWords
-  \fi
-  \HandNextWord
-}
-\newcommand{\HandTextLine}[2]{%
-  \begingroup
-  \def\HandTextLimit{#1}%
-  \strut\HandTextWords #2 {\HandEndWords} \strut
-  \endgroup
-}
-\newcommand{\HandFitText}[3]{%
-  \begingroup
-  \sbox{\HandTextBoxRegister}{%
-    \begin{minipage}[t]{#1}%
-      \fontsize{10}{11.8}\selectfont\raggedright
-      \setlength{\parindent}{0pt}\setlength{\parskip}{0pt}%
-      #3%
-    \end{minipage}%
-  }%
-  \HandFitBox{#1}{#2}{\usebox{\HandTextBoxRegister}}%
-  \endgroup
-}"""
+_CONTENT_MATH = re.compile(
+    _TEXT_MATH.pattern + r"|(?<!\\)\\begin\{(?P<environment>equation\*?|displaymath|align\*?|alignat\*?|gather\*?|multline\*?|eqnarray\*?|split)\}.*?\\end\{(?P=environment)\}",
+    re.S,
+)
+_LIST_ITEM = re.compile(r"^\s*(?:([-*•])\s+|(\d+)[.)]\s+)(.+)$")
+_HEADING = re.compile(r"^\s*(#{1,6})\s+(.+)$")
 
 
 def escape_tex(text: str) -> str:
@@ -88,11 +31,8 @@ def escape_tex(text: str) -> str:
 
 def clean_math(text: str) -> str:
     value = text.strip()
-    value = re.sub(r"^```(?:latex|tex)?\s*", "", value, flags=re.I)
-    value = re.sub(r"\s*```$", "", value)
-    # OCR can return one wrapped formula or several adjacent wrapped formulas.
-    # Strip each segment before the renderer places the result in math mode.
-    # Escaped dollars (e.g. \text{cost \$5}) belong to the formula itself.
+    value = re.sub(r"^\x60{3}(?:latex|tex)?\s*", "", value, flags=re.I)
+    value = re.sub(r"\s*\x60{3}$", "", value)
     wrapped = re.compile(
         r"\$\$((?:\\.|[^$])*)\$\$|\$((?:\\.|[^$])*)\$"
         r"|\\\[(.*?)\\\]|\\\((.*?)\\\)", re.S,
@@ -109,9 +49,6 @@ def clean_math(text: str) -> str:
             position += 1
     if segments and position == len(value):
         value = r"\quad ".join(segment for segment in segments if segment)
-    # Display environments open their own math mode and cannot be nested in the
-    # resizebox's $...$. Keep their formula content and use inner environments
-    # for row/column alignment. Existing matrices, arrays and aligned stay intact.
     inner_environments = {
         "equation": "", "displaymath": "",
         "align": "aligned", "eqnarray": "aligned", "split": "aligned",
@@ -124,132 +61,204 @@ def clean_math(text: str) -> str:
         return linebreaks + (rf"\{command}{{{replacement}}}" if replacement else "")
 
     value = re.sub(
-        # An environment command may immediately follow a \\ row break. Match
-        # pairs of preceding backslashes so the real command is still converted.
         r"(?<!\\)((?:\\\\)*)\\(begin|end)\s*\{(equation\*?|displaymath|align\*?|eqnarray\*?|split|alignat\*?|gather\*?|multline\*?)\}",
         inner_environment, value,
     )
     return value.strip()
 
 
-def _text_content(content: str, width_mm: float) -> str:
-    """Escape prose while keeping explicit math as one measurable TeX token."""
-    paragraphs: list[str] = []
-    parts: list[str] = []
+def render_text(content: str) -> str:
+    """Soft-wrap OCR lines into prose and keep explicit semantic formatting."""
+    value = content.strip().replace("\r\n", "\n").replace("\r", "\n")
+    value = re.sub(r"^\x60{3}(?:markdown|text|latex|tex)?\s*\n", "", value, flags=re.I)
+    value = re.sub(r"\n\s*\x60{3}$", "", value)
+    formulas: dict[str, str] = {}
 
-    def finish_line() -> None:
-        value = "".join(parts).strip()
-        if value:
-            paragraphs.append(rf"\HandTextLine{{{width_mm:.3f}mm}}{{{value}}}")
-        parts.clear()
+    def protect_math(match: re.Match[str]) -> str:
+        raw_environment = match.group("environment") is not None
+        formula = clean_math(match.group(0) if raw_environment else next(group for group in match.groups()[:4] if group is not None))
+        token = f"\x00M{len(formulas)}\x00"
+        display = raw_environment or match.group(0).startswith(("$$", r"\["))
+        formulas[token] = ("\\[\n" + formula + "\n\\]" if display else r"\(" + formula + r"\)")
+        return token
 
-    def prose(value: str) -> None:
-        for part in re.split(r"(\r\n|\r|\n)", value):
-            if part in {"\r\n", "\r", "\n"}:
-                finish_line()
-            else:
-                parts.append(escape_tex(re.sub(r"[\t\f\v ]+", " ", part)))
-
+    # A currency dollar can otherwise consume the opening delimiter of a later
+    # formula. Leave that dollar literal and restart before the later delimiter.
+    protected: list[str] = []
     position = 0
-    for match in _TEXT_MATH.finditer(content):
-        prose(content[position:match.start()])
-        formula = clean_math(next(group for group in match.groups() if group is not None))
-        if formula:
-            # Braces protect spaces inside a formula from the word measurement.
-            parts.append("{$" + formula + "$}")
-        position = match.end()
-    prose(content[position:])
-    finish_line()
-    return r"\par ".join(paragraphs) + (r"\par" if paragraphs else "")
-
-
-def _available_height(unit: ProcessingUnit, page_h: int, units: list[ProcessingUnit]) -> float:
-    """Limit rendering to the original box, page bottom and next overlapping row."""
-    top = unit.bbox.y1 / page_h * A4_H_MM
-    bottom = min(A4_H_MM, unit.bbox.y2 / page_h * A4_H_MM)
-    for other in units:
-        if other is unit or other.category == "figure" or other.bbox.y1 <= unit.bbox.y1:
-            continue
-        if unit.bbox.horizontal_overlap_ratio(other.bbox) >= .5:
-            next_top = other.bbox.y1 / page_h * A4_H_MM
-            bottom = min(bottom, next_top - .35)
-    return max(0.0, bottom - top)
-
-
-def _text_box(unit: ProcessingUnit, page_w: int, page_h: int, fit_height_mm: float | None = None) -> str:
-    x = unit.bbox.x1 / page_w * A4_W_MM
-    top = unit.bbox.y1 / page_h * A4_H_MM
-    w = max(4.0, unit.bbox.width / page_w * A4_W_MM)
-    h = max(3.0, unit.bbox.height / page_h * A4_H_MM)
-    y = A4_H_MM - top - h
-    content = unit.decoded.strip()
-    fit_width = max(0.0, min(unit.bbox.width / page_w * A4_W_MM, A4_W_MM - x))
-    fit_height = max(0.0, min(unit.bbox.height / page_h * A4_H_MM, A4_H_MM - top))
-    if fit_height_mm is not None:
-        fit_height = min(fit_height, fit_height_mm)
-    # Leave a small allowance for glyph bearings and extraction rounding.
-    fit_width = max(0.0, fit_width - .15)
-    fit_height = max(0.0, fit_height - .15)
-
-    if unit.category == "figure":
-        path = Path(unit.crop_path).as_posix()
-        body = rf"\includegraphics[width={w:.3f}mm,height={h:.3f}mm,keepaspectratio]{{{path}}}"
-    elif unit.category == "math":
-        math = clean_math(content)
-        body = rf"\HandFitBox{{{fit_width:.3f}mm}}{{{fit_height:.3f}mm}}{{${{\displaystyle {math}}}$}}" if math and fit_width > 0 and fit_height > 0 else ""
-    elif unit.category == "table":
-        tabular = table_to_latex(content)
-        if tabular:
-            body = rf"\HandFitBox{{{fit_width:.3f}mm}}{{{fit_height:.3f}mm}}{{{tabular}}}" if fit_width > 0 and fit_height > 0 else ""
+    while match := _CONTENT_MATH.search(value, position):
+        body = match.group(2)
+        currency = (body is not None and re.match(r"\d", body)
+                    and re.search(r"\s+[^\W\d_]{2,}", body)
+                    and match.end() < len(value) and (value[match.end()].isalnum() or value[match.end()] == "\\"))
+        if currency:
+            protected.append(value[position:match.start() + 1])
+            position = match.start() + 1
         else:
-            path = Path(unit.crop_path).as_posix()
-            body = rf"\includegraphics[width={w:.3f}mm,height={h:.3f}mm,keepaspectratio]{{{path}}}"
-    else:
-        escaped = _text_content(content, fit_width)
-        body = rf"\HandFitText{{{fit_width:.3f}mm}}{{{fit_height:.3f}mm}}{{{escaped}}}" if escaped and fit_width > 0 and fit_height > 0 else ""
+            protected.append(value[position:match.start()])
+            protected.append(protect_math(match))
+            position = match.end()
+    protected.append(value[position:])
+    value = "".join(protected)
 
-    return (
-        rf"\put({x:.3f},{y:.3f}){{\parbox[b][{h:.3f}mm][t]{{{w:.3f}mm}}{{{body}}}}}" + "\n"
+    def inline(source: str) -> str:
+        result: list[str] = []
+        position = 0
+        for match in re.finditer(r"\x00M\d+\x00|\*\*([^*\n]+)\*\*", source):
+            result.append(escape_tex(source[position:match.start()]))
+            token = match.group(0)
+            result.append(formulas[token] if token in formulas else r"\textbf{" + inline(match.group(1)) + "}")
+            position = match.end()
+        result.append(escape_tex(source[position:]))
+        return "".join(result)
+
+    blocks: list[str] = []
+    prose: list[str] = []
+    items: list[str] = []
+    list_kind = ""
+
+    def flush_prose() -> None:
+        if prose:
+            blocks.append(inline(" ".join(prose)))
+            prose.clear()
+
+    def flush_list() -> None:
+        nonlocal list_kind
+        if items:
+            blocks.append(r"\begin{" + list_kind + "}\n" + "\n".join(items) + "\n" + r"\end{" + list_kind + "}")
+            items.clear()
+            list_kind = ""
+
+    for raw_line in value.split("\n"):
+        line = re.sub(r"[\t\f\v ]+", " ", raw_line).strip()
+        if not line:
+            flush_prose()
+            flush_list()
+            continue
+        heading = _HEADING.match(line)
+        item = _LIST_ITEM.match(line)
+        if heading:
+            flush_prose()
+            flush_list()
+            level = min(len(heading.group(1)), 3)
+            command = {1: "section", 2: "subsection", 3: "subsubsection"}[level]
+            blocks.append("\\" + command + "*{" + inline(heading.group(2)) + "}")
+        elif item:
+            flush_prose()
+            kind = "itemize" if item.group(1) else "enumerate"
+            if list_kind and kind != list_kind:
+                flush_list()
+            list_kind = kind
+            # Preserve explicitly recognized numbering, including non-1 starts.
+            label = "[" + item.group(2) + ".]" if item.group(2) else ""
+            items.append(r"\item" + label + " " + inline(item.group(3)))
+        elif items:
+            items[-1] += " " + inline(line)
+        else:
+            prose.append(line)
+    flush_prose()
+    flush_list()
+    return "\n\n".join(blocks)
+
+
+def _source_background(unit: ProcessingUnit, page: PageLayout) -> bool:
+    labels = {block.source_label for block in page.blocks if block.id in unit.member_ids}
+    return bool(labels & {"residual_background", "whole_page_no_text"}) or any(
+        member.endswith("_residual") for member in unit.member_ids
     )
 
 
+def _figure(unit: ProcessingUnit, page: PageLayout) -> str:
+    if not unit.crop_path:
+        return ""
+    # Approximate relative size only: no source position or scanned paper.
+    fraction = max(.25, min(1.0, unit.bbox.width / max(1, page.width_px)))
+    path = Path(unit.crop_path).as_posix()
+    return (
+        "\\begin{center}\n"
+        + rf"\includegraphics[width={fraction:.3f}\linewidth,height=0.55\textheight,keepaspectratio]{{{path}}}"
+        + "\n\\end{center}"
+    )
+
+
+def _render_document(pages: list[PageLayout]) -> str:
+    blocks: list[str] = []
+    prose = ""
+    previous: ProcessingUnit | None = None
+    previous_page: int | None = None
+
+    def flush() -> None:
+        nonlocal prose, previous, previous_page
+        if prose.strip():
+            blocks.append(render_text(prose))
+        prose, previous, previous_page = "", None, None
+
+    ordered = [(page, unit) for page in sorted(pages, key=lambda page: page.index) for unit in reading_order(page)]
+    for page, unit in ordered:
+        if _source_background(unit, page):
+            continue
+        if unit.category in {"text", "unknown"}:
+            content = unit.decoded.strip()
+            if not content:
+                continue
+            if prose:
+                structural = any(_LIST_ITEM.match(line) or _HEADING.match(line)
+                                 for line in (prose.splitlines()[-1], content.splitlines()[0]))
+                boundary = previous_page == page.index and starts_paragraph(previous, unit, page)
+                separator = "\n\n" if boundary else "\n" if structural else " "
+                prose += separator
+            prose += content
+            previous = unit
+            previous_page = page.index
+            continue
+        flush()
+        if unit.category == "math":
+            formula = clean_math(unit.decoded)
+            if formula:
+                blocks.append("\\[\n" + formula + "\n\\]")
+        elif unit.category == "table":
+            tabular = table_to_latex(unit.decoded)
+            if tabular:
+                blocks.append("\\begin{center}\n" + tabular + "\n\\end{center}")
+            elif unit.crop_path:
+                blocks.append(_figure(unit, page))
+        elif unit.category == "figure":
+            blocks.append(_figure(unit, page))
+    flush()
+    return "\n\n".join(block for block in blocks if block)
+
+
 def build_tex(layout: DocumentLayout, output_dir: Path, title: str) -> Path:
+    """Author a standard editable document; LaTeX handles wrapping and pages."""
     output_dir.mkdir(parents=True, exist_ok=True)
     assets = output_dir / "assets"
-    assets.mkdir(exist_ok=True)
-
-    # Copy all crops needed by the final document to a stable relative directory.
     for page in layout.pages:
         for unit in page.units:
-            if unit.category in {"figure", "table"} and unit.crop_path:
-                src = Path(unit.crop_path)
-                dst = assets / src.name
-                if src.resolve() != dst.resolve():
-                    shutil.copy2(src, dst)
-                unit.crop_path = str(Path("assets") / dst.name)
+            if unit.category not in {"figure", "table"} or not unit.crop_path or _source_background(unit, page):
+                continue
+            src = Path(unit.crop_path)
+            if not src.is_absolute() and (output_dir / src).is_file():
+                continue
+            assets.mkdir(exist_ok=True)
+            identifier = re.sub(r"[^A-Za-z0-9_.-]", "_", unit.id)
+            dst = assets / f"p{page.index:04d}_{identifier}{src.suffix.lower()}"
+            if src.resolve() != dst.resolve():
+                shutil.copy2(src, dst)
+            unit.crop_path = str(Path("assets") / dst.name)
 
-    pages_tex: list[str] = []
-    for page in layout.pages:
-        parts = [r"\noindent\begin{picture}(210,297)"]
-        for unit in page.units:
-            height = _available_height(unit, page.height_px, page.units)
-            parts.append(_text_box(unit, page.width_px, page.height_px, height))
-        parts.append(r"\end{picture}")
-        pages_tex.append("\n".join(parts))
-
-    safe_title = escape_tex(title)
-    joined_pages = "\n\\newpage\n".join(pages_tex)
-    tex = rf"""\documentclass[10pt]{{article}}
-\usepackage[paperwidth=210mm,paperheight=297mm,margin=0mm]{{geometry}}
+    body = _render_document(layout.pages)
+    heading = "\\title{" + escape_tex(title.strip()) + "}\n\\date{}\n\\maketitle\n" if title.strip() else ""
+    tex = rf"""\documentclass[11pt,a4paper]{{article}}
+\usepackage[margin=25mm]{{geometry}}
 \usepackage{{amsmath,amssymb,graphicx,array}}
 \usepackage[T1]{{fontenc}}
 \usepackage[utf8]{{inputenc}}
-\pagestyle{{empty}}
 \setlength{{\parindent}}{{0pt}}
-\setlength{{\unitlength}}{{1mm}}
-{FIT_MACROS}
+\setlength{{\parskip}}{{0.45em}}
+\setlength{{\emergencystretch}}{{2em}}
+\linespread{{1.08}}
 \begin{{document}}
-{joined_pages}
+{heading}{body}
 \end{{document}}
 """
     path = output_dir / "main.tex"

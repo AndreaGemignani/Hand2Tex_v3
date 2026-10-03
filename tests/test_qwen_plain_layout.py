@@ -218,7 +218,7 @@ def test_rotated_envelope_rejects_nonfinite_or_nonpositive_dimensions(rect):
 
 
 @pytest.mark.asyncio
-async def test_plain_coordinate_layout_runs_crop_decoding_and_preserves_residual(
+async def test_plain_coordinate_layout_runs_crop_decoding_without_scan_background(
     settings, coordinate_csv, monkeypatch, tmp_path,
 ):
     layout_attempts = []
@@ -268,7 +268,7 @@ async def test_plain_coordinate_layout_runs_crop_decoding_and_preserves_residual
     text_blocks = [block for block in page["blocks"] if block["category"] == "text"]
     assert len(text_blocks) == 44
     assert all(block["hint_text"] == "" for block in text_blocks)
-    assert any(block["source_label"] == "residual_background" for block in page["blocks"])
+    assert not any(block["source_label"] == "residual_background" for block in page["blocks"])
     decoded = json.loads((result_dir / "decoded.json").read_text(encoding="utf-8"))
     text_units = [unit for unit in decoded if unit["category"] == "text"]
     assert len(text_units) == len(crop_sizes)
@@ -278,6 +278,5 @@ async def test_plain_coordinate_layout_runs_crop_decoding_and_preserves_residual
     assert result["manifest"]["status"] == "ok"
     assert result["manifest"]["detector_errors"] == []
     layout = json.loads((result_dir / "layout.json").read_text(encoding="utf-8"))
-    residual = next(unit for unit in layout["pages"][0]["units"] if unit["category"] == "figure")
-    assert residual["decoder"] == "preserve-original"
-    assert (result_dir / residual["crop_path"]).exists()
+    assert not any(unit["category"] == "figure" for unit in layout["pages"][0]["units"])
+    assert result["manifest"]["output_mode"] == "flow-document"

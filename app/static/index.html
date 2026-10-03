@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="it">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
@@ -19,35 +19,35 @@ button{width:100%;font-size:1rem;margin-top:18px}button:disabled{opacity:.55}.fi
 <body>
 <main>
 <section class="hero">
-<span class="pill">V2.13 DEBUG · DETECT → PACK → DECODE → REBUILD</span>
+<span class="pill">V2.14 · Documento LaTeX standard</span>
 <h1>{{APP_NAME}}</h1>
-<p class="sub">Upload handwritten notes, scans or tablet exports. Layout is detected locally, text/math/tables are decoded only where needed, figures remain original, and the page is rebuilt in LaTeX at the detected positions.</p>
+<p class="sub">Trasforma appunti scritti a mano, scansioni o esportazioni da tablet in un documento scritto al computer. Testo, formule e tabelle seguono l'ordine di lettura, con margini e impaginazione regolari. I disegni originali sono inseriti nel documento come immagini.</p>
 </section>
 <section class="card">
 <form id="form">
 <div id="drop" class="drop">
-<p><strong>Drop PDF or images here</strong></p>
-<label class="btn" for="files">Choose files</label>
+<p><strong>Trascina qui PDF o immagini</strong></p>
+<label class="btn" for="files">Scegli i file</label>
 <input id="files" type="file" accept="application/pdf,image/png,image/jpeg,image/webp" multiple required />
-<div id="fileList" class="files">No files selected.</div>
+<div id="fileList" class="files">Nessun file selezionato.</div>
 </div>
-<div class="field"><label><strong>Document title</strong></label><input id="title" type="text" value="Converted Notes" /></div>
-<label class="checks"><input id="debug" type="checkbox" {{DEBUG_CHECKED}} /> Include raw/debug metadata in result ZIP</label>
-<button id="submit" type="submit">Convert to LaTeX + PDF</button>
+<div class="field"><label><strong>Titolo del documento</strong></label><input id="title" type="text" value="Appunti convertiti" /></div>
+<label class="checks"><input id="debug" type="checkbox" {{DEBUG_CHECKED}} /> Includi dati di diagnostica nello ZIP</label>
+<button id="submit" type="submit">Crea documento LaTeX + PDF</button>
 <div id="status" class="status"></div>
-<div class="hint">The output ZIP contains <code>main.pdf</code>, <code>main.tex</code>, <code>layout.json</code>, decoded blocks, preserved image assets, a compile log and a cost estimate.</div>
+<div class="hint">Lo ZIP contiene il PDF impaginato, il sorgente LaTeX modificabile, i disegni conservati e i dati di diagnostica. Il riconoscimento dei blocchi serve a ordinare il contenuto e preparare i ritagli per la trascrizione.</div>
 </form>
 </section>
 </main>
 <script>
 const form=document.getElementById('form'),files=document.getElementById('files'),drop=document.getElementById('drop'),list=document.getElementById('fileList'),status=document.getElementById('status'),submit=document.getElementById('submit');
-function showFiles(){const a=[...files.files];list.textContent=a.length?a.map(f=>`${f.name} (${(f.size/1024/1024).toFixed(1)} MB)`).join(' · '):'No files selected.'}
+function showFiles(){const a=[...files.files];list.textContent=a.length?a.map(f=>`${f.name} (${(f.size/1024/1024).toFixed(1)} MB)`).join(' · '):'Nessun file selezionato.'}
 files.addEventListener('change',showFiles);['dragenter','dragover'].forEach(e=>drop.addEventListener(e,x=>{x.preventDefault();drop.classList.add('drag')}));['dragleave','drop'].forEach(e=>drop.addEventListener(e,x=>{x.preventDefault();drop.classList.remove('drag')}));drop.addEventListener('drop',e=>{files.files=e.dataTransfer.files;showFiles()});
 form.addEventListener('submit',async e=>{
   e.preventDefault();
   if(!files.files.length)return;
   submit.disabled=true;
-  status.textContent='Detecting layout, grouping regions, decoding and rebuilding…';
+  status.textContent='Riconoscimento del contenuto, trascrizione e impaginazione del documento…';
   const fd=new FormData();
   [...files.files].forEach(f=>fd.append('files',f));
   fd.append('title',document.getElementById('title').value);
@@ -68,14 +68,14 @@ form.addEventListener('submit',async e=>{
     a.remove();
     setTimeout(()=>URL.revokeObjectURL(url),3000);
     if(outcome==='error'){
-      status.textContent='Conversion failed. Diagnostic ZIP downloaded; see diagnostic_error.json.';
+      status.textContent='Conversione non riuscita. ZIP di diagnostica scaricato; consulta diagnostic_error.json.';
     }else if(outcome==='warning'){
-      status.textContent='ZIP downloaded with a layout warning: at least one page has no usable text boxes and was preserved as an image. See manifest.json and parsed_layout.json when debug is enabled.';
+      status.textContent='ZIP scaricato con avvisi: alcune parti richiedono una verifica. Le pagine originali sono allegate nella cartella sources, separatamente dal documento impaginato. Consulta manifest.json.';
     }else{
-      status.textContent='Done.';
+      status.textContent='Documento LaTeX e PDF scaricati.';
     }
   }catch(err){
-    status.textContent='Error: '+err.message;
+    status.textContent='Errore: '+err.message;
   }finally{
     submit.disabled=false;
   }

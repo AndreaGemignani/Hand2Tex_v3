@@ -123,13 +123,16 @@ async def test_debug_captures_complete_responses_and_layout_for_each_page(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("include_debug", [True, False])
-async def test_empty_layout_is_preserved_with_zero_quality(
+async def test_empty_layout_uses_text_fallback_with_zero_quality(
     settings, compiled_pdf, tmp_path, include_debug,
 ):
     response = layout_response(words=[])
 
     async def handler(request):
-        return httpx.Response(200, json=response)
+        body = json.loads(request.content)
+        if body["messages"][0]["content"][0]["text"].startswith("Locate all text"):
+            return httpx.Response(200, json=response)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "Fallback transcription of the original page."}}]})
 
     result = await real_pipeline(settings, handler).run(
         [image_file(tmp_path)], tmp_path / "work", "Empty layout", include_debug=include_debug,
@@ -137,14 +140,16 @@ async def test_empty_layout_is_preserved_with_zero_quality(
     assert result["manifest"]["detectors"][0]["quality"] == 0
     assert any(error["page"] == 0 for error in result["manifest"]["detector_errors"])
     layout = json.loads((result["result_dir"] / "layout.json").read_text(encoding="utf-8"))
-    assert layout["pages"][0]["blocks"][0]["source_label"] == "whole_page_no_text"
+    assert layout["pages"][0]["blocks"][0]["source_label"] == "whole_page_ocr_fallback"
+    assert layout["pages"][0]["units"][0]["decoded"] == "Fallback transcription of the original page."
+    assert result["manifest"]["source_pages"][0]["path"] == "sources/page_0000.png"
     if include_debug:
         parsed = read_diagnostics(result["result_dir"])[DEBUG_FILES[2]]["pages"][0]
         assert parsed["status"] == "no_usable_boxes"
         assert parsed["words_info"] == []
         assert parsed["usable_box_count"] == 0
         assert parsed["quality"] == 0
-        assert parsed["fallback"] == "whole_page_no_text"
+        assert parsed["fallback"] == "whole_page_ocr_fallback"
     else:
         assert all(not (result["result_dir"] / name).exists() for name in DEBUG_FILES)
 

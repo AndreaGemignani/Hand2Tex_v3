@@ -1,15 +1,26 @@
-# Hand2TeX V2.13 DEBUG — TrustedRouter
+# Hand2TeX V2.14 DEBUG — TrustedRouter
 
-Pipeline: **DETECT → PACK → DECODE → REBUILD**.
+Convert handwritten notes into a normal, editable LaTeX document: paragraphs, formulas, tables and original drawings in reading order, with regular margins and typography.
+
+Pipeline: **DETECT → PACK → DECODE → COMPOSE**.
 
 The selected models are unchanged:
 
 - **Qwen-VL-OCR** for layout, text, formulas/matrices and tables.
 - **Qwen3.8 Max** only as rescue for low-confidence decoding.
-- Drawings/figures are preserved as original pixels.
-- Final placement is deterministic LaTeX; no LLM is used to improvise the page layout.
+- Drawings/figures are preserved as original pixels and inserted into the document as images.
+- Detected geometry helps isolate and pack OCR crops, determine reading order and retain broad structural relationships. It does not fix the output text to scan coordinates.
+- LaTeX lays out the decoded content naturally, with normal paragraphs, inline or displayed mathematics, tables and figures.
 
-Qwen calls go through the OpenAI-compatible **TrustedRouter** gateway. V2.10 adds support for the position-only response captured by V2.9 diagnostics. Provider, models, request prompts and rendering architecture are unchanged.
+Qwen calls go through the OpenAI-compatible **TrustedRouter** gateway. Provider, models and request prompts are unchanged.
+
+## V2.14: a standard flowing document
+
+The output now reads like a document written on a computer, from beginning to end. Decoded text flows through normal LaTeX paragraphs; mathematics and tables use their native environments, and preserved drawings appear with the related content. Margins, wrapping and pagination are controlled by LaTeX instead of the original pixel coordinates. Source geometry guides content order and grouping, so the broad organization can remain familiar without reproducing each handwritten position.
+
+The scan is no longer the background of a reconstructed page with replacement text boxes. Layout detection, straightened line crops and OCR packing still reduce the material sent for decoding. This rendering change adds no model call. If content cannot be transcribed or a source fragment needs review, the conversion reports a warning and attaches the original page in the ZIP's `sources/` directory, separately from the typeset document.
+
+The notes below describe earlier versions; their positioned page rendering has been superseded by V2.14.
 
 ## V2.13: line crops and readable positioned text
 
@@ -94,17 +105,19 @@ No Alibaba region, workspace ID or DashScope key is required.
 
 ## Output
 
-Each conversion ZIP contains `main.pdf`, `main.tex`, `layout.json`, `decoded.json`, `manifest.json`, preserved image assets and `compile.log`.
+Each successful conversion ZIP contains the typeset `main.pdf`, editable `main.tex`, `layout.json`, `decoded.json`, `manifest.json`, preserved drawing assets and `compile.log`. The LaTeX source contains the decoded content in document order; layout coordinates remain available as diagnostic metadata.
+
+When a conversion has warnings, `manifest.json` lists `content_warnings` and `source_pages`. Original pages in `sources/` are review attachments and are not inserted as page backgrounds or substitutes for transcribed content.
 
 `manifest.json > cost_estimate` contains the estimated Qwen spend for that conversion.
 
 ## Local test
 
 ```bash
-docker build -t hand2tex-v211 .
+docker build -t hand2tex-v214 .
 docker run --rm -p 8000:10000 \
   -e TRUSTEDROUTER_API_KEY='YOUR_KEY' \
-  hand2tex-v211
+  hand2tex-v214
 ```
 
 ## Tests

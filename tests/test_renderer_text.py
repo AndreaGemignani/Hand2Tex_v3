@@ -4,7 +4,7 @@ import shutil
 import pytest
 
 from app.models import BBox, DocumentLayout, PageLayout, ProcessingUnit
-from app.services.renderer import _text_box, build_tex, clean_math, compile_pdf
+from app.services.renderer import render_text, build_tex, clean_math, compile_pdf
 
 
 def text_unit(decoded):
@@ -24,39 +24,35 @@ def test_multiline_ocr_text_preserves_characters_without_empty_latex_linebreaks(
     page = PageLayout(0, 1000, 1000, "unused.png", units=[unit])
     tex_path = build_tex(DocumentLayout([page]), tmp_path / "result", "Text rendering")
     document = tex_path.read_text(encoding="utf-8")
-    box = _text_box(unit, 1000, 1000)
+    box = render_text(decoded)
 
     assert "È già un caffè \\& tè: 50\\%" in document
     assert r"Seconda riga: \$ \# \_ \{ \} \textasciitilde{} \textasciicircum{} \textbackslash{}" in document
     assert "Ultimo paragrafo" in document
     assert document.index("È già un caffè") < document.index("Seconda riga") < document.index("Ultimo paragrafo")
-    assert len(re.findall(r"\\par\b", box)) >= 2
+    assert len(box.split("\n\n")) == 2
     assert r"\\ \\" not in document
     assert not re.search(r"\\\\\s*\\\\", document)
     # Inspect the box to exclude legitimate document macros such as \noindent.
     assert r"\n" not in box
     assert "\r" not in box
-    assert box.startswith(r"\put(21.000,178.200){\parbox[b][59.400mm][t]{105.000mm}{")
+    assert r"\put" not in document
 
 
-def test_line_and_paragraph_separators_leave_box_position_and_size_unchanged():
-    plain = _text_box(text_unit("First line"), 1000, 1000)
-    multiline = _text_box(text_unit("\n  First line\n\n\nSecond line\r\n  \r\nThird line\n  "), 1000, 1000)
-    geometry_pattern = r"^\\put\(([^)]+)\)\{\\parbox\[b\]\[([^]]+)\]\[t\]\{([^}]+)\}"
-    assert re.match(geometry_pattern, multiline).groups() == re.match(geometry_pattern, plain).groups()
-    assert "First line" in multiline and "Second line" in multiline and "Third line" in multiline
-    assert re.search(r"\\par\b", multiline)
+def test_ocr_soft_lines_wrap_normally_and_blank_lines_separate_paragraphs():
+    multiline = render_text("\n  First line\nSecond line\r\n  \r\nThird line\n  ")
+    assert multiline == "First line Second line\n\nThird line"
     assert not re.search(r"\\\\\s*\\\\", multiline)
     assert r"\n" not in multiline
 
 
 @pytest.mark.parametrize("decoded", ["", "\n\n", "\r\n   \r\n\t\r\n"])
 def test_empty_or_whitespace_only_text_has_no_forced_linebreaks(decoded):
-    box = _text_box(text_unit(decoded), 1000, 1000)
+    box = render_text(decoded)
     assert r"\\" not in box
     assert r"\n" not in box
     assert not re.search(r"\\par\b", box)
-    assert box.startswith(r"\put(21.000,178.200){\parbox[b][59.400mm][t]{105.000mm}{")
+    assert box == ""
 
 
 @pytest.mark.parametrize("wrapped", [

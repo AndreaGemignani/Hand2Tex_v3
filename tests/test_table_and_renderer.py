@@ -15,7 +15,7 @@ def test_markdown_table_to_latex():
     assert "1 & 2" in latex
 
 
-def test_renderer_writes_absolute_layout(tmp_path):
+def test_renderer_writes_standard_document_with_original_figure(tmp_path):
     fig = tmp_path / "figure.png"
     Image.new("RGB", (100, 100), "white").save(fig)
     page = PageLayout(0, 1000, 1400, str(fig))
@@ -26,10 +26,12 @@ def test_renderer_writes_absolute_layout(tmp_path):
     ]
     tex = build_tex(DocumentLayout([page]), tmp_path / "out", "Test")
     content = tex.read_text()
-    assert "\\put(" in content
+    assert "\\put(" not in content
+    assert "\\begin{picture}" not in content
+    assert "margin=25mm" in content
     assert "Hello \\& world" in content
     assert "\\frac{a}{b}" in content
-    assert "assets/figure.png" in content
+    assert "assets/p0000_F.png" in content
 
 
 def test_pdf_compile_if_available(tmp_path):

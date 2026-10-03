@@ -92,7 +92,7 @@ def _dedupe(blocks: list[LayoutBlock]) -> list[LayoutBlock]:
     for block in blocks:
         if block.category == "text" and any(
             other.category in {"figure", "table"}
-            and other.source_label != "residual_background"
+            and other.source_label not in {"residual_background", "local_source_fragment"}
             and _intersection_area(block, other) / max(1.0, abs(_signed_area(_points(block)))) >= .82
             for other in blocks if other.id != block.id
         ):

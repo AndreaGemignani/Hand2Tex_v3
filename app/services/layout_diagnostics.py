@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 
-DEBUG_VERSION = "2.13-debug"
+DEBUG_VERSION = "2.14-debug"
 _SECRET_FIELDS = {
     "authorization", "proxy_authorization", "api_key", "apikey", "x_api_key",
     "access_token", "password", "secret", "cookie", "set_cookie",
@@ -101,7 +101,7 @@ class LayoutTrace:
             "status": "no_usable_boxes" if fallback else "ok",
             "words_info": words_info,
             "blocks": [asdict(block) for block in blocks],
-            "usable_box_count": 0 if fallback else sum(block.source_label != "residual_background" for block in blocks),
+            "usable_box_count": 0 if fallback else sum(block.source_label.startswith("qwen_layout_") for block in blocks),
             "quality": quality,
             "fallback": fallback,
         }, self.owner.api_key))
