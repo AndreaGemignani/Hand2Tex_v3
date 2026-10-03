@@ -16,7 +16,7 @@ from app.pipeline import Hand2TeXPipeline, PipelineError
 BASE = Path(__file__).resolve().parent
 STATIC = BASE / "static"
 settings = Settings()
-app = FastAPI(title=settings.app_name, version="0.2.4")
+app = FastAPI(title=settings.app_name, version="0.2.5")
 pipeline = Hand2TeXPipeline(settings)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
@@ -36,7 +36,7 @@ def health() -> dict:
     return {
         "status": "ok",
         "app": settings.app_name,
-        "qwen_configured": bool(settings.dashscope_api_key),
+        "qwen_configured": bool(settings.trustedrouter_api_key),
         "mistral_layout_rescue": bool(settings.mistral_api_key and settings.enable_mistral_layout_rescue),
         "jev": bool(settings.typesafe_api_key and settings.jev_enabled),
         "layout_backend": settings.layout_backend,
