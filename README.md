@@ -1,4 +1,4 @@
-# Hand2TeX V2.12 DEBUG — TrustedRouter
+# Hand2TeX V2.13 DEBUG — TrustedRouter
 
 Pipeline: **DETECT → PACK → DECODE → REBUILD**.
 
@@ -10,6 +10,16 @@ The selected models are unchanged:
 - Final placement is deterministic LaTeX; no LLM is used to improvise the page layout.
 
 Qwen calls go through the OpenAI-compatible **TrustedRouter** gateway. V2.10 adds support for the position-only response captured by V2.9 diagnostics. Provider, models, request prompts and rendering architecture are unchanged.
+
+## V2.13: line crops and readable positioned text
+
+The first successful PDF exposed overlapping OCR text, oversized fonts and literal math commands. Rotated layout corners are now preserved alongside the existing placement envelopes. Text/math crops exclude pixels outside their line polygons and are straightened before decoding. Overlapping polygons within a group are cropped as one union so shared handwriting is not copied twice; separate lines can still be packed into one OCR request.
+
+Grouping now uses actual line geometry, keeps columns separate and limits text groups to six lines and one fifth of a page. Equal-score duplicate boxes retain one stable representative. The renderer measures text and formulas with TeX and shrinks them to their available width and height, including the space before the next overlapping block. Explicit math delimiters in text are rendered as formulas without another OCR request.
+
+The residual layer uses line polygons and a neutral paper color instead of a color averaged from highlighted corners. Drawings outside the removed text regions retain their original pixels. Synthetic tests cover rotated crops, overlapping groups, drawing preservation, inline formulas and rendered PDF bounds.
+
+Provider, models and prompts remain unchanged. Validation scores check structure and do not establish transcription accuracy; the next conversion is needed to assess OCR quality with the improved crops.
 
 ## V2.12: display math inside positioned boxes
 

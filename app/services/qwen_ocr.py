@@ -156,8 +156,18 @@ def _parse_plain_position_text(text: str) -> list[dict[str, Any]]:
     return items
 
 
-def _rotated_rect_envelope(rect: list[Any]) -> tuple[float, float, float, float] | None:
-    """Convert [cx,cy,w,h,angle] to an axis-aligned envelope, respecting rotation."""
+def _ordered_polygon(corners: list[tuple[float, float]]) -> list[float]:
+    """Keep a clockwise quad, starting at its top-left corner."""
+    first = min(range(4), key=lambda index: sum(corners[index]))
+    corners = corners[first:] + corners[:first]
+    area = sum(corners[i][0] * corners[(i + 1) % 4][1] - corners[(i + 1) % 4][0] * corners[i][1] for i in range(4))
+    if area < 0:
+        corners = [corners[0], *reversed(corners[1:])]
+    return [coordinate for point in corners for coordinate in point]
+
+
+def _rotated_rect_polygon(rect: list[Any]) -> list[float] | None:
+    """Retain [cx,cy,w,h,angle] corners for line crops instead of just an envelope."""
     if len(rect) < 4:
         return None
     try:
@@ -174,9 +184,14 @@ def _rotated_rect_envelope(rect: list[Any]) -> tuple[float, float, float, float]
         x = cx + dx*c - dy*sn
         y = cy + dx*sn + dy*c
         corners.append((x, y))
-    xs = [x for x, _ in corners]
-    ys = [y for _, y in corners]
-    return min(xs), min(ys), max(xs), max(ys)
+    return _ordered_polygon(corners)
+
+
+def _rotated_rect_envelope(rect: list[Any]) -> tuple[float, float, float, float] | None:
+    polygon = _rotated_rect_polygon(rect)
+    if polygon is None:
+        return None
+    return min(polygon[::2]), min(polygon[1::2]), max(polygon[::2]), max(polygon[1::2])
 
 
 
@@ -336,12 +351,14 @@ class QwenOCRClient:
                         break
             rotate_rect = item.get("rotate_rect")
             coords = location if isinstance(location, list) else bbox if isinstance(bbox, list) else []
+            polygon: list[float] = []
 
             try:
                 if isinstance(coords, list) and len(coords) == 8:
                     xs = [float(coords[i]) for i in (0, 2, 4, 6)]
                     ys = [float(coords[i]) for i in (1, 3, 5, 7)]
                     x1, y1, x2, y2 = min(xs), min(ys), max(xs), max(ys)
+                    polygon = _ordered_polygon(list(zip(xs, ys)))
                     # `location` is already in image pixels in the official task.
                 elif isinstance(coords, list) and len(coords) == 4:
                     x1, y1, x2, y2 = map(float, coords)
@@ -350,27 +367,28 @@ class QwenOCRClient:
                         x1, x2 = x1 * width / 1000.0, x2 * width / 1000.0
                         y1, y2 = y1 * height / 1000.0, y2 * height / 1000.0
                 elif isinstance(rotate_rect, list) and len(rotate_rect) >= 4:
-                    envelope = _rotated_rect_envelope(rotate_rect)
-                    if envelope is None:
+                    polygon = _rotated_rect_polygon(rotate_rect) or []
+                    if not polygon:
                         continue
-                    x1, y1, x2, y2 = envelope
                     if item.get("coordinate_space") == "normalized_1000":
                         # Rotate in the model's coordinate space before restoring
                         # the page's aspect ratio; scaling the rectangle first
                         # would change its angle and give incorrect crops.
-                        x1, x2 = x1 * width / 1000.0, x2 * width / 1000.0
-                        y1, y2 = y1 * height / 1000.0, y2 * height / 1000.0
+                        polygon = [value * (width if index % 2 == 0 else height) / 1000.0 for index, value in enumerate(polygon)]
+                    x1, x2 = min(polygon[::2]), max(polygon[::2])
+                    y1, y2 = min(polygon[1::2]), max(polygon[1::2])
                 else:
                     continue
             except (TypeError, ValueError):
                 continue
 
-            if not all(math.isfinite(value) for value in (x1, y1, x2, y2)):
+            if not all(math.isfinite(value) for value in (x1, y1, x2, y2, *polygon)):
                 continue
             x1, x2 = sorted((max(0.0, min(float(width), x1)), max(0.0, min(float(width), x2))))
             y1, y2 = sorted((max(0.0, min(float(height), y1)), max(0.0, min(float(height), y2))))
             if x2 - x1 < 2 or y2 - y1 < 2:
                 continue
+            polygon = [max(0.0, min(float(width if index % 2 == 0 else height), value)) for index, value in enumerate(polygon)]
             recognized = str(item.get("text", item.get("word", ""))).strip()
             words.append({
                 "location": [x1, y1, x2, y1, x2, y2, x1, y2],
@@ -378,5 +396,6 @@ class QwenOCRClient:
                 # Qwen advanced_recognition does not classify regions; downstream
                 # heuristics classify math/text without another model call.
                 "category": str(item.get("category", "")).strip().lower(),
+                "polygon": polygon,
             })
         return LocateResult(words_info=words, usage=raw.get("usage") or {}, raw=raw)

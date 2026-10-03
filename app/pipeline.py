@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import re
+from statistics import median
 from pathlib import Path
 from typing import Any
 
-from PIL import Image, ImageDraw, ImageStat
+from PIL import Image, ImageDraw
 
 from app.config import Settings
 from app.models import BBox, DocumentLayout, LayoutBlock, PageLayout
@@ -58,6 +60,9 @@ def _qwen_words_to_blocks(words: list[dict[str, Any]], page_index: int) -> list[
             ys = [float(loc[i]) for i in (1, 3, 5, 7)]
         except (TypeError, ValueError):
             continue
+        polygon = item.get("polygon") or []
+        if len(polygon) != 8 or not all(isinstance(value, (int, float)) and math.isfinite(value) for value in polygon):
+            polygon = []
         text = str(item.get("text", "")).strip()
         raw_category = str(item.get("category", "")).strip().lower()
         if raw_category in {"math", "formula", "equation", "matrix"}:
@@ -80,24 +85,24 @@ def _qwen_words_to_blocks(words: list[dict[str, Any]], page_index: int) -> list[
                 bbox=BBox(min(xs), min(ys), max(xs), max(ys)),
                 provider="qwen-vl-ocr-layout",
                 hint_text=text,
+                polygon=list(polygon),
             )
         )
     return blocks
 
 
 def _background_color(image: Image.Image) -> tuple[int, int, int]:
-    """Estimate paper/background color from the four page corners."""
+    """Estimate neutral paper, excluding ink and colored corner highlights."""
     rgb = image.convert("RGB")
-    w, h = rgb.size
-    s = max(4, min(w, h) // 40)
-    corners = [
-        rgb.crop((0, 0, s, s)),
-        rgb.crop((w - s, 0, w, s)),
-        rgb.crop((0, h - s, s, h)),
-        rgb.crop((w - s, h - s, w, h)),
-    ]
-    means = [ImageStat.Stat(c).mean[:3] for c in corners]
-    return tuple(int(sum(vals) / len(vals)) for vals in zip(*means))
+    # Sample original pixels; averaging a squared-paper grid would tint its white
+    # background gray just as highlighted corners previously tinted it yellow.
+    rgb = rgb.resize((min(160, rgb.width), min(160, rgb.height)), Image.Resampling.NEAREST)
+    pixels = list(rgb.getdata())
+    neutral = [pixel for pixel in pixels if min(pixel) >= 180 and max(pixel) - min(pixel) <= 20]
+    if not neutral:
+        cutoff = sorted(sum(pixel) for pixel in pixels)[int((len(pixels) - 1) * .8)]
+        neutral = [pixel for pixel in pixels if sum(pixel) >= cutoff]
+    return tuple(int(median(pixel[channel] for pixel in neutral)) for channel in range(3))
 
 
 def _make_residual_page(page_path: Path, blocks: list[LayoutBlock], out_path: Path) -> None:
@@ -113,6 +118,11 @@ def _make_residual_page(page_path: Path, blocks: list[LayoutBlock], out_path: Pa
         pad = max(3, round(min(image.size) * 0.0025))
         for block in blocks:
             if block.category not in {"text", "math"}:
+                continue
+            if len(block.polygon) == 8:
+                points = list(zip(block.polygon[::2], block.polygon[1::2]))
+                draw.polygon(points, fill=bg)
+                draw.line([*points, points[0]], fill=bg, width=pad * 2 + 1, joint="curve")
                 continue
             box = block.bbox.expand(pad, image.width, image.height)
             draw.rectangle((int(box.x1), int(box.y1), int(box.x2), int(box.y2)), fill=bg)

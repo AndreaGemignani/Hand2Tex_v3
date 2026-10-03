@@ -12,6 +12,71 @@ from app.services.table_latex import to_latex as table_to_latex
 A4_W_MM = 210.0
 A4_H_MM = 297.0
 
+_TEXT_MATH = re.compile(
+    r"(?<![\\$])\$\$((?:\\.|[^$])*)\$\$|(?<![\\$])\$(?!\$)((?:\\.|[^$])*)\$(?!\d)"
+    r"|(?<!\\)\\\((.*?)\\\)|(?<!\\)\\\[(.*?)\\\]", re.S,
+)
+
+# Measure at a native Computer Modern size, then shrink graphics uniformly.
+# This does not need an extra font package or substitute arbitrary font sizes.
+# Tokens are measured separately so an unbreakable word or inline formula cannot
+# protrude from the minipage before the whole paragraph is fitted vertically.
+FIT_MACROS = r"""\newsavebox{\HandFitBoxRegister}
+\newsavebox{\HandTextBoxRegister}
+\newsavebox{\HandTokenBoxRegister}
+\newcommand{\HandFitBox}[3]{%
+  \begingroup
+  \sbox{\HandFitBoxRegister}{#3}%
+  \ifdim\wd\HandFitBoxRegister>#1\relax
+    \sbox{\HandFitBoxRegister}{\resizebox{#1}{!}{\usebox{\HandFitBoxRegister}}}%
+  \fi
+  \ifdim\dimexpr\ht\HandFitBoxRegister+\dp\HandFitBoxRegister\relax>#2\relax
+    \resizebox*{!}{#2}{\usebox{\HandFitBoxRegister}}%
+  \else
+    \usebox{\HandFitBoxRegister}%
+  \fi
+  \endgroup
+}
+\newcommand{\HandTextToken}[2]{%
+  \begingroup
+  \sbox{\HandTokenBoxRegister}{#2}%
+  \ifdim\wd\HandTokenBoxRegister>#1\relax
+    \resizebox{#1}{!}{\usebox{\HandTokenBoxRegister}}%
+  \else
+    \usebox{\HandTokenBoxRegister}%
+  \fi
+  \endgroup
+}
+\def\HandWordStop{\HandEndWords}
+\def\HandTextWords#1 {%
+  \def\HandCurrentWord{#1}%
+  \ifx\HandCurrentWord\HandWordStop
+    \let\HandNextWord\relax
+  \else
+    \HandTextToken{\HandTextLimit}{#1}\space
+    \let\HandNextWord\HandTextWords
+  \fi
+  \HandNextWord
+}
+\newcommand{\HandTextLine}[2]{%
+  \begingroup
+  \def\HandTextLimit{#1}%
+  \strut\HandTextWords #2 {\HandEndWords} \strut
+  \endgroup
+}
+\newcommand{\HandFitText}[3]{%
+  \begingroup
+  \sbox{\HandTextBoxRegister}{%
+    \begin{minipage}[t]{#1}%
+      \fontsize{10}{11.8}\selectfont\raggedright
+      \setlength{\parindent}{0pt}\setlength{\parskip}{0pt}%
+      #3%
+    \end{minipage}%
+  }%
+  \HandFitBox{#1}{#2}{\usebox{\HandTextBoxRegister}}%
+  \endgroup
+}"""
+
 
 def escape_tex(text: str) -> str:
     replacements = {
@@ -67,40 +132,81 @@ def clean_math(text: str) -> str:
     return value.strip()
 
 
-def _font_size_for(unit: ProcessingUnit, page_h: int, text: str) -> float:
-    h_ratio = unit.bbox.height / max(1, page_h)
-    lines = max(1, len(text.splitlines()))
-    approx = (h_ratio * A4_H_MM * 2.6) / lines
-    return max(7.0, min(15.0, approx))
+def _text_content(content: str, width_mm: float) -> str:
+    """Escape prose while keeping explicit math as one measurable TeX token."""
+    paragraphs: list[str] = []
+    parts: list[str] = []
+
+    def finish_line() -> None:
+        value = "".join(parts).strip()
+        if value:
+            paragraphs.append(rf"\HandTextLine{{{width_mm:.3f}mm}}{{{value}}}")
+        parts.clear()
+
+    def prose(value: str) -> None:
+        for part in re.split(r"(\r\n|\r|\n)", value):
+            if part in {"\r\n", "\r", "\n"}:
+                finish_line()
+            else:
+                parts.append(escape_tex(re.sub(r"[\t\f\v ]+", " ", part)))
+
+    position = 0
+    for match in _TEXT_MATH.finditer(content):
+        prose(content[position:match.start()])
+        formula = clean_math(next(group for group in match.groups() if group is not None))
+        if formula:
+            # Braces protect spaces inside a formula from the word measurement.
+            parts.append("{$" + formula + "$}")
+        position = match.end()
+    prose(content[position:])
+    finish_line()
+    return r"\par ".join(paragraphs) + (r"\par" if paragraphs else "")
 
 
-def _text_box(unit: ProcessingUnit, page_w: int, page_h: int) -> str:
+def _available_height(unit: ProcessingUnit, page_h: int, units: list[ProcessingUnit]) -> float:
+    """Limit rendering to the original box, page bottom and next overlapping row."""
+    top = unit.bbox.y1 / page_h * A4_H_MM
+    bottom = min(A4_H_MM, unit.bbox.y2 / page_h * A4_H_MM)
+    for other in units:
+        if other is unit or other.category == "figure" or other.bbox.y1 <= unit.bbox.y1:
+            continue
+        if unit.bbox.horizontal_overlap_ratio(other.bbox) >= .5:
+            next_top = other.bbox.y1 / page_h * A4_H_MM
+            bottom = min(bottom, next_top - .35)
+    return max(0.0, bottom - top)
+
+
+def _text_box(unit: ProcessingUnit, page_w: int, page_h: int, fit_height_mm: float | None = None) -> str:
     x = unit.bbox.x1 / page_w * A4_W_MM
     top = unit.bbox.y1 / page_h * A4_H_MM
     w = max(4.0, unit.bbox.width / page_w * A4_W_MM)
     h = max(3.0, unit.bbox.height / page_h * A4_H_MM)
     y = A4_H_MM - top - h
     content = unit.decoded.strip()
+    fit_width = max(0.0, min(unit.bbox.width / page_w * A4_W_MM, A4_W_MM - x))
+    fit_height = max(0.0, min(unit.bbox.height / page_h * A4_H_MM, A4_H_MM - top))
+    if fit_height_mm is not None:
+        fit_height = min(fit_height, fit_height_mm)
+    # Leave a small allowance for glyph bearings and extraction rounding.
+    fit_width = max(0.0, fit_width - .15)
+    fit_height = max(0.0, fit_height - .15)
 
     if unit.category == "figure":
         path = Path(unit.crop_path).as_posix()
         body = rf"\includegraphics[width={w:.3f}mm,height={h:.3f}mm,keepaspectratio]{{{path}}}"
     elif unit.category == "math":
         math = clean_math(content)
-        body = rf"\resizebox{{{w:.3f}mm}}{{!}}{{${{\displaystyle {math}}}$}}" if math else ""
+        body = rf"\HandFitBox{{{fit_width:.3f}mm}}{{{fit_height:.3f}mm}}{{${{\displaystyle {math}}}$}}" if math and fit_width > 0 and fit_height > 0 else ""
     elif unit.category == "table":
         tabular = table_to_latex(content)
         if tabular:
-            body = rf"\resizebox{{{w:.3f}mm}}{{!}}{{{tabular}}}"
+            body = rf"\HandFitBox{{{fit_width:.3f}mm}}{{{fit_height:.3f}mm}}{{{tabular}}}" if fit_width > 0 and fit_height > 0 else ""
         else:
             path = Path(unit.crop_path).as_posix()
             body = rf"\includegraphics[width={w:.3f}mm,height={h:.3f}mm,keepaspectratio]{{{path}}}"
     else:
-        fs = _font_size_for(unit, page_h, content)
-        # OCR paragraphs can include blank lines. Consecutive \\ commands fail
-        # with "There's no line here to end"; explicit paragraphs are safe.
-        escaped = r"\par ".join(escape_tex(line) for line in content.splitlines() if line.strip())
-        body = rf"\fontsize{{{fs:.2f}}}{{{fs*1.18:.2f}}}\selectfont\raggedright {escaped}\par" if escaped else ""
+        escaped = _text_content(content, fit_width)
+        body = rf"\HandFitText{{{fit_width:.3f}mm}}{{{fit_height:.3f}mm}}{{{escaped}}}" if escaped and fit_width > 0 and fit_height > 0 else ""
 
     return (
         rf"\put({x:.3f},{y:.3f}){{\parbox[b][{h:.3f}mm][t]{{{w:.3f}mm}}{{{body}}}}}" + "\n"
@@ -126,7 +232,8 @@ def build_tex(layout: DocumentLayout, output_dir: Path, title: str) -> Path:
     for page in layout.pages:
         parts = [r"\noindent\begin{picture}(210,297)"]
         for unit in page.units:
-            parts.append(_text_box(unit, page.width_px, page.height_px))
+            height = _available_height(unit, page.height_px, page.units)
+            parts.append(_text_box(unit, page.width_px, page.height_px, height))
         parts.append(r"\end{picture}")
         pages_tex.append("\n".join(parts))
 
@@ -140,6 +247,7 @@ def build_tex(layout: DocumentLayout, output_dir: Path, title: str) -> Path:
 \pagestyle{{empty}}
 \setlength{{\parindent}}{{0pt}}
 \setlength{{\unitlength}}{{1mm}}
+{FIT_MACROS}
 \begin{{document}}
 {joined_pages}
 \end{{document}}

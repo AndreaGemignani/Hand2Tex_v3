@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 
-DEBUG_VERSION = "2.12-debug"
+DEBUG_VERSION = "2.13-debug"
 _SECRET_FIELDS = {
     "authorization", "proxy_authorization", "api_key", "apikey", "x_api_key",
     "access_token", "password", "secret", "cookie", "set_cookie",

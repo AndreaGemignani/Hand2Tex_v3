@@ -70,6 +70,7 @@ class LayoutBlock:
     bbox: BBox
     provider: str = "paddle"
     hint_text: str = ""
+    polygon: list[float] = field(default_factory=list)
 
 
 @dataclass
@@ -87,6 +88,7 @@ class ProcessingUnit:
     rescued: bool = False
     usage_events: list[dict[str, Any]] = field(default_factory=list)
     hint_text: str = ""
+    polygons: list[list[float]] = field(default_factory=list)
 
 
 @dataclass
