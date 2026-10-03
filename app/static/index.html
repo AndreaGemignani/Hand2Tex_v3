@@ -19,7 +19,7 @@ button{width:100%;font-size:1rem;margin-top:18px}button:disabled{opacity:.55}.fi
 <body>
 <main>
 <section class="hero">
-<span class="pill">DETECT → PACK → DECODE → REBUILD</span>
+<span class="pill">V2.9 DEBUG · DETECT → PACK → DECODE → REBUILD</span>
 <h1>{{APP_NAME}}</h1>
 <p class="sub">Upload handwritten notes, scans or tablet exports. Layout is detected locally, text/math/tables are decoded only where needed, figures remain original, and the page is rebuilt in LaTeX at the detected positions.</p>
 </section>
@@ -32,7 +32,7 @@ button{width:100%;font-size:1rem;margin-top:18px}button:disabled{opacity:.55}.fi
 <div id="fileList" class="files">No files selected.</div>
 </div>
 <div class="field"><label><strong>Document title</strong></label><input id="title" type="text" value="Converted Notes" /></div>
-<label class="checks"><input id="debug" type="checkbox" /> Include raw/debug metadata in result ZIP</label>
+<label class="checks"><input id="debug" type="checkbox" {{DEBUG_CHECKED}} /> Include raw/debug metadata in result ZIP</label>
 <button id="submit" type="submit">Convert to LaTeX + PDF</button>
 <div id="status" class="status"></div>
 <div class="hint">The output ZIP contains <code>main.pdf</code>, <code>main.tex</code>, <code>layout.json</code>, decoded blocks, preserved image assets, a compile log and a cost estimate.</div>
@@ -43,7 +43,43 @@ button{width:100%;font-size:1rem;margin-top:18px}button:disabled{opacity:.55}.fi
 const form=document.getElementById('form'),files=document.getElementById('files'),drop=document.getElementById('drop'),list=document.getElementById('fileList'),status=document.getElementById('status'),submit=document.getElementById('submit');
 function showFiles(){const a=[...files.files];list.textContent=a.length?a.map(f=>`${f.name} (${(f.size/1024/1024).toFixed(1)} MB)`).join(' · '):'No files selected.'}
 files.addEventListener('change',showFiles);['dragenter','dragover'].forEach(e=>drop.addEventListener(e,x=>{x.preventDefault();drop.classList.add('drag')}));['dragleave','drop'].forEach(e=>drop.addEventListener(e,x=>{x.preventDefault();drop.classList.remove('drag')}));drop.addEventListener('drop',e=>{files.files=e.dataTransfer.files;showFiles()});
-form.addEventListener('submit',async e=>{e.preventDefault();if(!files.files.length)return;submit.disabled=true;status.textContent='Detecting layout, grouping regions, decoding and rebuilding…';const fd=new FormData();[...files.files].forEach(f=>fd.append('files',f));fd.append('title',document.getElementById('title').value);fd.append('include_debug',document.getElementById('debug').checked?'true':'false');try{const r=await fetch('/api/convert',{method:'POST',body:fd});if(!r.ok){let t=await r.text();try{t=JSON.parse(t).detail||t}catch{}throw new Error(t)}const blob=await r.blob(),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='hand2tex_result.zip';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),3000);status.textContent='Done.'}catch(err){status.textContent='Error: '+err.message}finally{submit.disabled=false}});
+form.addEventListener('submit',async e=>{
+  e.preventDefault();
+  if(!files.files.length)return;
+  submit.disabled=true;
+  status.textContent='Detecting layout, grouping regions, decoding and rebuilding…';
+  const fd=new FormData();
+  [...files.files].forEach(f=>fd.append('files',f));
+  fd.append('title',document.getElementById('title').value);
+  fd.append('include_debug',document.getElementById('debug').checked?'true':'false');
+  try{
+    const r=await fetch('/api/convert',{method:'POST',body:fd});
+    if(!r.ok){
+      let t=await r.text();
+      try{t=JSON.parse(t).detail||t}catch{}
+      throw new Error(t);
+    }
+    const outcome=r.headers.get('X-Hand2TeX-Status');
+    const blob=await r.blob(),url=URL.createObjectURL(blob),a=document.createElement('a');
+    a.href=url;
+    a.download=outcome==='error'?'hand2tex_debug.zip':'hand2tex_result.zip';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url),3000);
+    if(outcome==='error'){
+      status.textContent='Conversion failed. Diagnostic ZIP downloaded; see diagnostic_error.json.';
+    }else if(outcome==='warning'){
+      status.textContent='ZIP downloaded with a layout warning: at least one page has no usable text boxes and was preserved as an image. See manifest.json and parsed_layout.json when debug is enabled.';
+    }else{
+      status.textContent='Done.';
+    }
+  }catch(err){
+    status.textContent='Error: '+err.message;
+  }finally{
+    submit.disabled=false;
+  }
+});
 </script>
 </body>
 </html>

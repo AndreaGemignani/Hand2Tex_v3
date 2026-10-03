@@ -1,6 +1,4 @@
-# Hand2TeX V2.8
-
-# Hand2TeX V2.5 — TrustedRouter
+# Hand2TeX V2.9 DEBUG — TrustedRouter
 
 Pipeline: **DETECT → PACK → DECODE → REBUILD**.
 
@@ -11,7 +9,23 @@ The selected models are unchanged:
 - Drawings/figures are preserved as original pixels.
 - Final placement is deterministic LaTeX; no LLM is used to improvise the page layout.
 
-The only change from V2.4 is the API provider: Qwen calls now go through the OpenAI-compatible **TrustedRouter** gateway instead of a direct Alibaba/DashScope account.
+Qwen calls go through the OpenAI-compatible **TrustedRouter** gateway. V2.9 adds layout diagnostics; the provider, models, request prompts, OCR parser and rendering architecture remain the same as V2.8.
+
+## V2.9 DEBUG
+
+Debug is enabled by default in the web form and API. Repeat the failing conversion and inspect these files at the root of the downloaded ZIP:
+
+- `qwen_layout_raw.json`: complete JSON response for every Qwen layout request, grouped by zero-based page index. Every retry is retained with its HTTP status. Non-JSON responses keep the complete body in `response_text`; transport failures include the error.
+- `request_payload_sanitized.json`: matching request attempts, including model, prompt, provider and `ocr_options`. Authorization headers are never recorded; API keys are redacted, and image base64 data is replaced with `[OMITTED]`. No outgoing request is changed.
+- `parsed_layout.json`: actual normalized `words_info`, resulting blocks, usable box count, quality and fallback status for each page that uses Qwen layout.
+
+Responses are saved **before parsing**, and all diagnostics are written before PDF compilation. Each conversion has its own collector. Diagnostics add no model calls or token costs. Qwen crop decoding and optional rescue responses are outside this layout trace.
+
+Zero usable boxes now reports `quality: 0.0`, `status: "no_usable_boxes"` and `fallback: "whole_page_no_text"`. The original page is preserved, while the UI and manifest report a warning instead of claiming a successful transcription. A drawing-only page can also trigger this warning; no new classification heuristic is introduced.
+
+If parsing, an OCR request or PDF compilation fails in debug mode, the API returns `hand2tex_debug.zip` containing the available diagnostics and `diagnostic_error.json`. Its HTTP status is 200 so the browser can download it; `X-Hand2TeX-Status: error` identifies the failed conversion. Successful conversions use `ok` or `warning`. This diagnostic ZIP may not contain a PDF.
+
+Uncheck the debug option, send `include_debug=false`, or set `INCLUDE_DEBUG=false` to disable these files. With debug disabled, failed conversions retain the usual HTTP error response. Inspect the real response before adapting the parser.
 
 ## Required environment variable
 
@@ -25,7 +39,7 @@ Defaults already included in `render.yaml`:
 
 ```text
 TRUSTEDROUTER_BASE_URL=https://api.trustedrouter.com/v1
-QWEN_OCR_MODEL=qwen/qwen-vl-ocr
+QWEN_OCR_MODEL=qwen/qwen-vl-ocr-2025-11-20
 QWEN_RESCUE_MODEL=qwen/qwen3.8-max
 TRUSTEDROUTER_SORT=price
 ```
@@ -49,10 +63,10 @@ Each conversion ZIP contains `main.pdf`, `main.tex`, `layout.json`, `decoded.jso
 ## Local test
 
 ```bash
-docker build -t hand2tex-v25 .
+docker build -t hand2tex-v29 .
 docker run --rm -p 8000:10000 \
   -e TRUSTEDROUTER_API_KEY='YOUR_KEY' \
-  hand2tex-v25
+  hand2tex-v29
 ```
 
 ## Tests

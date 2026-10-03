@@ -63,7 +63,7 @@ class Settings:
     jev_model: str = field(default_factory=lambda: os.getenv("JEV_MODEL", "jev-latest"))
     jev_endpoint: str = field(default_factory=lambda: os.getenv("JEV_ENDPOINT", "https://api.typesafe.ai/v1/systemone"))
 
-    include_debug_by_default: bool = field(default_factory=lambda: _bool("INCLUDE_DEBUG", False))
+    include_debug_by_default: bool = field(default_factory=lambda: _bool("INCLUDE_DEBUG", True))
 
     # Current TrustedRouter prepaid list prices; override via env if they change.
     qwen_ocr_input_per_million_usd: float = field(default_factory=lambda: _float("QWEN_OCR_INPUT_PER_M_USD", 0.0735))

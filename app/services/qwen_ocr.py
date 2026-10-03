@@ -13,6 +13,7 @@ import httpx
 from PIL import Image
 
 from app.config import Settings
+from app.services.layout_diagnostics import LayoutTrace
 
 
 class QwenOCRError(RuntimeError):
@@ -180,10 +181,24 @@ class QwenOCRClient:
             return {"sort": sort, "usage": "credits"}
         return {"usage": "credits"}
 
-    async def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
+    async def _post(self, payload: dict[str, Any], diagnostics: LayoutTrace | None = None) -> dict[str, Any]:
         timeout = httpx.Timeout(connect=20, read=self.settings.qwen_timeout_s, write=60, pool=20)
-        async with httpx.AsyncClient(timeout=timeout, transport=self.transport) as client:
-            response = await client.post(self.settings.trustedrouter_chat_url, headers=self._headers(), json=payload)
+        attempt = diagnostics.start_attempt(payload, self.settings.trustedrouter_chat_url) if diagnostics else None
+        try:
+            async with httpx.AsyncClient(timeout=timeout, transport=self.transport) as client:
+                response = await client.post(self.settings.trustedrouter_chat_url, headers=self._headers(), json=payload)
+        except Exception as exc:
+            if diagnostics and attempt is not None:
+                diagnostics.record_error(attempt, exc)
+            raise
+        # Capture the entire provider response before status checks or parsing.
+        if diagnostics and attempt is not None:
+            try:
+                body = response.json()
+            except ValueError:
+                diagnostics.record_response(attempt, response.status_code, None, response.text)
+            else:
+                diagnostics.record_response(attempt, response.status_code, body)
         if response.status_code >= 400:
             raise QwenOCRError(f"TrustedRouter Qwen OCR {response.status_code}: {response.text[:800]}")
         try:
@@ -213,7 +228,7 @@ class QwenOCRClient:
         raw = await self._post(payload)
         return DecodeResult(text=_extract_text(raw), usage=raw.get("usage") or {}, raw=raw)
 
-    async def locate_text_lines(self, image_path: Path) -> LocateResult:
+    async def locate_text_lines(self, image_path: Path, *, diagnostics: LayoutTrace | None = None) -> LocateResult:
         """Use the same Qwen-VL-OCR model via TrustedRouter to recover layout boxes.
 
         The gateway is OpenAI-compatible, so we request compact normalized JSON rather
@@ -241,11 +256,11 @@ class QwenOCRClient:
             "ocr_options": {"task": "advanced_recognition"},
         }
         try:
-            raw = await self._post(payload)
+            raw = await self._post(payload, diagnostics)
         except QwenOCRError as exc:
             if any(code in str(exc) for code in (" 400:", " 404:", " 422:")):
                 payload.pop("ocr_options", None)
-                raw = await self._post(payload)
+                raw = await self._post(payload, diagnostics)
             else:
                 raise
 

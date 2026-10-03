@@ -14,6 +14,7 @@ from app.services.crops import materialize_crops
 from app.services.grouping import build_processing_units
 from app.services.input_pages import render_inputs
 from app.services.jev_router import JevRouter
+from app.services.layout_diagnostics import DEBUG_VERSION, LayoutDiagnostics
 from app.services.layout_detector import PaddleLayoutDetector
 from app.services.mistral_layout import MistralLayoutError, MistralLayoutRescue
 from app.services.qwen_ocr import QwenOCRClient
@@ -203,29 +204,41 @@ class Hand2TeXPipeline:
                 except Exception:
                     pass
 
-    async def _layout_qwen(self, page, detector_errors, layout_usage_events):
+    async def _layout_qwen(self, page, detector_errors, layout_usage_events, diagnostics=None):
+        trace = diagnostics.for_page(page.index, page.width, page.height) if diagnostics else None
         try:
-            located = await self.qwen.locate_text_lines(page.path)
+            if trace:
+                located = await self.qwen.locate_text_lines(page.path, diagnostics=trace)
+            else:
+                located = await self.qwen.locate_text_lines(page.path)
+            blocks = _qwen_words_to_blocks(located.words_info, page.index)
         except Exception as exc:
+            if trace:
+                trace.fail(exc)
             raise PipelineError(f"Qwen layout call failed on page {page.index + 1}: {type(exc).__name__}: {exc}") from exc
 
         layout_usage_events.append({"provider": "qwen_ocr", **(located.usage or {})})
-        blocks = _qwen_words_to_blocks(located.words_info, page.index)
 
         if not blocks:
-            # A page with no recognized text may be a drawing-only page. Preserve it.
+            # Preserve the original, but do not claim successful text recognition.
+            detector_errors.append({
+                "page": page.index, "stage": "qwen-layout",
+                "error": "0 usable boxes; original page preserved without transcription",
+            })
             blocks = [
                 LayoutBlock(
                     id=f"p{page.index:04d}_fullpage",
                     page=page.index,
                     category="figure",
                     source_label="whole_page_no_text",
-                    score=1.0,
+                    score=0.0,
                     bbox=BBox(0, 0, page.width, page.height),
                     provider="qwen-vl-ocr-layout",
                 )
             ]
-            return blocks, 1.0, "qwen-vl-ocr-layout"
+            if trace:
+                trace.record_parsed(located.words_info, blocks, 0.0, "whole_page_no_text")
+            return blocks, 0.0, "qwen-vl-ocr-layout"
 
         # Preserve every non-recognized pixel as a residual background. This keeps
         # drawings/diagrams without requiring a heavy local detector on Render Free.
@@ -241,6 +254,8 @@ class Hand2TeXPipeline:
                 provider="qwen-residual",
             ),
         )
+        if trace:
+            trace.record_parsed(located.words_info, blocks, 0.95)
         return blocks, 0.95, "qwen-vl-ocr-layout+residual"
 
     async def run(self, input_paths: list[Path], work_dir: Path, title: str, include_debug: bool = False) -> dict[str, Any]:
@@ -248,6 +263,7 @@ class Hand2TeXPipeline:
         crops_dir = work_dir / "crops"
         result_dir = work_dir / "result"
         result_dir.mkdir(parents=True, exist_ok=True)
+        diagnostics = LayoutDiagnostics(result_dir, self.settings.trustedrouter_api_key) if include_debug else None
 
         pages = render_inputs(input_paths, pages_dir, self.settings.render_dpi, self.settings.max_pages)
         if not pages:
@@ -270,7 +286,7 @@ class Hand2TeXPipeline:
             use_qwen_layout = self.settings.layout_backend == "qwen" and not self._detector_injected
 
             if use_qwen_layout:
-                blocks, quality, detector_name = await self._layout_qwen(page, detector_errors, layout_usage_events)
+                blocks, quality, detector_name = await self._layout_qwen(page, detector_errors, layout_usage_events, diagnostics)
             else:
                 try:
                     blocks, quality = self.detector.detect(page.path, page.index)
@@ -295,7 +311,7 @@ class Hand2TeXPipeline:
                         detector_errors.append({"page": page.index, "stage": "mistral-layout", "error": str(exc)})
 
                 if not blocks:
-                    blocks, quality, detector_name = await self._layout_qwen(page, detector_errors, layout_usage_events)
+                    blocks, quality, detector_name = await self._layout_qwen(page, detector_errors, layout_usage_events, diagnostics)
                     rescued_layout = True
 
             pl = PageLayout(
@@ -333,6 +349,8 @@ class Hand2TeXPipeline:
 
         all_units = [u for p in layout.pages for u in p.units]
         manifest = {
+            "version": DEBUG_VERSION,
+            "status": "warning" if any(p.detector_quality == 0.0 for p in layout.pages) else "ok",
             "title": title,
             "pages": len(layout.pages),
             "detectors": [
