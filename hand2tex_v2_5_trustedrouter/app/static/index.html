@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>{{APP_NAME}}</title>
+<style>
+:root{font-family:Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif;color:#111827;background:#f3f4f6}
+*{box-sizing:border-box}body{margin:0}main{max-width:900px;margin:0 auto;padding:56px 20px}.hero{margin-bottom:24px}
+h1{font-size:clamp(2.2rem,7vw,4.8rem);line-height:.95;letter-spacing:-.055em;margin:0 0 14px}.sub{max-width:720px;color:#4b5563;line-height:1.6}
+.card{background:#fff;border:1px solid #e5e7eb;border-radius:22px;padding:24px;box-shadow:0 15px 40px rgba(0,0,0,.05)}
+.drop{border:2px dashed #cbd5e1;border-radius:16px;padding:34px 18px;text-align:center;transition:.15s}.drop.drag{border-color:#111827;background:#f8fafc}
+input[type=file]{display:none}.btn,button{border:0;border-radius:12px;padding:12px 17px;font-weight:750;cursor:pointer;background:#111827;color:#fff}.btn{display:inline-block}
+button{width:100%;font-size:1rem;margin-top:18px}button:disabled{opacity:.55}.field{margin-top:18px}input[type=text]{margin-top:7px;width:100%;padding:12px;border:1px solid #d1d5db;border-radius:11px;font-size:1rem}
+.files,.hint,.status{color:#4b5563;font-size:.9rem}.files{margin-top:12px}.status{margin-top:16px;white-space:pre-wrap;min-height:24px}.hint{margin-top:18px;line-height:1.5}.checks{display:flex;gap:8px;align-items:center;margin-top:14px;color:#4b5563;font-size:.9rem}
+.pill{display:inline-block;border-radius:999px;background:#e5e7eb;padding:5px 9px;font-size:.75rem;margin-bottom:12px}
+</style>
+</head>
+<body>
+<main>
+<section class="hero">
+<span class="pill">DETECT → PACK → DECODE → REBUILD</span>
+<h1>{{APP_NAME}}</h1>
+<p class="sub">Upload handwritten notes, scans or tablet exports. Layout is detected locally, text/math/tables are decoded only where needed, figures remain original, and the page is rebuilt in LaTeX at the detected positions.</p>
+</section>
+<section class="card">
+<form id="form">
+<div id="drop" class="drop">
+<p><strong>Drop PDF or images here</strong></p>
+<label class="btn" for="files">Choose files</label>
+<input id="files" type="file" accept="application/pdf,image/png,image/jpeg,image/webp" multiple required />
+<div id="fileList" class="files">No files selected.</div>
+</div>
+<div class="field"><label><strong>Document title</strong></label><input id="title" type="text" value="Converted Notes" /></div>
+<label class="checks"><input id="debug" type="checkbox" /> Include raw/debug metadata in result ZIP</label>
+<button id="submit" type="submit">Convert to LaTeX + PDF</button>
+<div id="status" class="status"></div>
+<div class="hint">The output ZIP contains <code>main.pdf</code>, <code>main.tex</code>, <code>layout.json</code>, decoded blocks, preserved image assets, a compile log and a cost estimate.</div>
+</form>
+</section>
+</main>
+<script>
+const form=document.getElementById('form'),files=document.getElementById('files'),drop=document.getElementById('drop'),list=document.getElementById('fileList'),status=document.getElementById('status'),submit=document.getElementById('submit');
+function showFiles(){const a=[...files.files];list.textContent=a.length?a.map(f=>`${f.name} (${(f.size/1024/1024).toFixed(1)} MB)`).join(' · '):'No files selected.'}
+files.addEventListener('change',showFiles);['dragenter','dragover'].forEach(e=>drop.addEventListener(e,x=>{x.preventDefault();drop.classList.add('drag')}));['dragleave','drop'].forEach(e=>drop.addEventListener(e,x=>{x.preventDefault();drop.classList.remove('drag')}));drop.addEventListener('drop',e=>{files.files=e.dataTransfer.files;showFiles()});
+form.addEventListener('submit',async e=>{e.preventDefault();if(!files.files.length)return;submit.disabled=true;status.textContent='Detecting layout, grouping regions, decoding and rebuilding…';const fd=new FormData();[...files.files].forEach(f=>fd.append('files',f));fd.append('title',document.getElementById('title').value);fd.append('include_debug',document.getElementById('debug').checked?'true':'false');try{const r=await fetch('/api/convert',{method:'POST',body:fd});if(!r.ok){let t=await r.text();try{t=JSON.parse(t).detail||t}catch{}throw new Error(t)}const blob=await r.blob(),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='hand2tex_result.zip';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),3000);status.textContent='Done.'}catch(err){status.textContent='Error: '+err.message}finally{submit.disabled=false}});
+</script>
+</body>
+</html>
