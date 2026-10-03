@@ -25,10 +25,25 @@ def clean_math(text: str) -> str:
     value = text.strip()
     value = re.sub(r"^```(?:latex|tex)?\s*", "", value, flags=re.I)
     value = re.sub(r"\s*```$", "", value)
-    if value.startswith("$$") and value.endswith("$$"):
-        value = value[2:-2].strip()
-    elif value.startswith("\\[") and value.endswith("\\]"):
-        value = value[2:-2].strip()
+    # OCR can return one wrapped formula or several adjacent wrapped formulas.
+    # Strip each segment before the renderer places the result in math mode.
+    # Escaped dollars (e.g. \text{cost \$5}) belong to the formula itself.
+    wrapped = re.compile(
+        r"\$\$((?:\\.|[^$])*)\$\$|\$((?:\\.|[^$])*)\$"
+        r"|\\\[(.*?)\\\]|\\\((.*?)\\\)", re.S,
+    )
+    segments: list[str] = []
+    position = 0
+    while position < len(value):
+        match = wrapped.match(value, position)
+        if not match:
+            break
+        segments.append(next(group for group in match.groups() if group is not None).strip())
+        position = match.end()
+        while position < len(value) and value[position].isspace():
+            position += 1
+    if segments and position == len(value):
+        value = r"\quad ".join(segment for segment in segments if segment)
     return value
 
 
@@ -62,8 +77,10 @@ def _text_box(unit: ProcessingUnit, page_w: int, page_h: int) -> str:
             body = rf"\includegraphics[width={w:.3f}mm,height={h:.3f}mm,keepaspectratio]{{{path}}}"
     else:
         fs = _font_size_for(unit, page_h, content)
-        escaped = escape_tex(content).replace("\n", r"\\ ")
-        body = rf"\fontsize{{{fs:.2f}}}{{{fs*1.18:.2f}}}\selectfont\raggedright {escaped}"
+        # OCR paragraphs can include blank lines. Consecutive \\ commands fail
+        # with "There's no line here to end"; explicit paragraphs are safe.
+        escaped = r"\par ".join(escape_tex(line) for line in content.splitlines() if line.strip())
+        body = rf"\fontsize{{{fs:.2f}}}{{{fs*1.18:.2f}}}\selectfont\raggedright {escaped}\par" if escaped else ""
 
     return (
         rf"\put({x:.3f},{y:.3f}){{\parbox[b][{h:.3f}mm][t]{{{w:.3f}mm}}{{{body}}}}}" + "\n"

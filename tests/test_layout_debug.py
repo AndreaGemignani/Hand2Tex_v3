@@ -318,3 +318,8 @@ async def test_layout_diagnostics_remain_when_compilation_fails(settings, monkey
     documents = read_diagnostics(work_dir / "result")
     assert documents[DEBUG_FILES[2]]["pages"][0]["status"] == "ok"
     assert (work_dir / "result" / "compile.log").read_text(encoding="utf-8") == "TeX compiler failed"
+    decoded = json.loads((work_dir / "result" / "decoded.json").read_text(encoding="utf-8"))
+    assert any(unit["decoded"] == "Handwritten notes about this page." for unit in decoded)
+    assert (work_dir / "result" / "layout.json").exists()
+    manifest = json.loads((work_dir / "result" / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["cost_estimate"]["qwen_ocr_input_tokens"] == 100

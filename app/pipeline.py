@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,14 @@ from app.services.validators import validate
 def _looks_math(text: str) -> bool:
     value = (text or "").strip()
     if not value:
+        return False
+    # A grouped paragraph can contain a few formulas among substantial prose.
+    # Keep that prose in the text path instead of replacing it with math-only OCR.
+    plain = re.sub(r"\\(?:begin|end)\{[^}]+\}", " ", value)
+    plain = re.sub(r"\\[A-Za-z]+", " ", plain)
+    math_words = {"sin", "cos", "tan", "cot", "sec", "csc", "log", "lim", "exp", "max", "min", "det", "mod"}
+    prose_words = [word for word in re.findall(r"[^\W\d_]{3,}", plain, flags=re.UNICODE) if word.lower() not in math_words]
+    if len(prose_words) > 3:
         return False
     math_chars = set("=+-×÷∫∑√∞≈≠≤≥^_()[]{}|<>∂∆λμπσθΩ")
     symbol_count = sum(ch in math_chars for ch in value)
@@ -343,9 +352,6 @@ class Hand2TeXPipeline:
         await asyncio.gather(*(self._decode_unit(unit, semaphore) for p in layout.pages for unit in p.units))
 
         tex_path = build_tex(layout, result_dir, title)
-        compilation = compile_pdf(tex_path)
-        if not compilation.get("ok"):
-            raise PipelineError(f"LaTeX compilation failed: {compilation.get('reason')}. See compile.log")
 
         all_units = [u for p in layout.pages for u in p.units]
         manifest = {
@@ -399,4 +405,9 @@ class Hand2TeXPipeline:
         )
         if include_debug:
             (result_dir / "layout_rescue_raw.json").write_text(json.dumps(raw_rescues, ensure_ascii=False, indent=2), encoding="utf-8")
+        # Keep decoded text, routing and costs available in a diagnostic ZIP even
+        # if the external PDF compiler fails.
+        compilation = compile_pdf(tex_path)
+        if not compilation.get("ok"):
+            raise PipelineError(f"LaTeX compilation failed: {compilation.get('reason')}. See compile.log")
         return {"result_dir": result_dir, "manifest": manifest, "compilation": compilation}

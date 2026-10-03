@@ -46,7 +46,9 @@ def validate_math(text: str) -> float:
         score += 0.20
     if "?" not in clean and "�" not in clean:
         score += 0.10
-    return max(0.0, min(1.0, score))
+    # Decimal weights sum to 1 mathematically, but to 0.9999999999999999 in
+    # binary floating point. Restore the intended equality with text scores.
+    return max(0.0, min(1.0, round(score, 10)))
 
 
 def validate_table(text: str) -> float:

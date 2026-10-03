@@ -1,4 +1,4 @@
-# Hand2TeX V2.10 DEBUG — TrustedRouter
+# Hand2TeX V2.11 DEBUG — TrustedRouter
 
 Pipeline: **DETECT → PACK → DECODE → REBUILD**.
 
@@ -10,6 +10,16 @@ The selected models are unchanged:
 - Final placement is deterministic LaTeX; no LLM is used to improvise the page layout.
 
 Qwen calls go through the OpenAI-compatible **TrustedRouter** gateway. V2.10 adds support for the position-only response captured by V2.9 diagnostics. Provider, models, request prompts and rendering architecture are unchanged.
+
+## V2.11: OCR paragraphs and math rendering
+
+The captured V2.10 run correctly detected 43 boxes, but PDF compilation failed with `There's no line here to end`. OCR blank lines had generated consecutive LaTeX line-break commands. Text boxes now use explicit paragraphs, so CRLF input and empty OCR lines do not cause that error.
+
+Math validation now returns an exact maximum score of `1.0`: floating-point rounding previously caused fully valid formula decoding to lose against a text score of `1.0`. Formulas are now eligible for the existing automatic math routing. Paragraphs with substantial prose remain in the text path; a few embedded symbols do not cause a whole paragraph to be replaced by formula-only OCR. The renderer removes external inline/display math delimiters before adding its own math wrapper.
+
+`decoded.json`, `layout.json`, `manifest.json` and the cost estimate are saved before compilation, including in a failed diagnostic ZIP. This exposes the actual OCR/routing result without needing another paid OCR request just to retrieve it.
+
+The GitHub test workflow installs the same TeX Live packages as production and runs the suite on Python 3.11, including real PDF compilation tests for OCR paragraphs and formulas. Models and provider are unchanged; these fixes add no API requests.
 
 ## V2.10: parse the observed layout response
 
@@ -73,10 +83,10 @@ Each conversion ZIP contains `main.pdf`, `main.tex`, `layout.json`, `decoded.jso
 ## Local test
 
 ```bash
-docker build -t hand2tex-v210 .
+docker build -t hand2tex-v211 .
 docker run --rm -p 8000:10000 \
   -e TRUSTEDROUTER_API_KEY='YOUR_KEY' \
-  hand2tex-v210
+  hand2tex-v211
 ```
 
 ## Tests
