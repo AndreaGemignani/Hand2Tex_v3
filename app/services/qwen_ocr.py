@@ -4,6 +4,7 @@ import base64
 import json
 import mimetypes
 import re
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -68,10 +69,7 @@ DECODE_PROMPTS = {
     ),
 }
 
-LAYOUT_PROMPT = """Locate all text lines and return the coordinates of the rotated rectangle ([cx, cy, width, height, angle]).
-Return the recognized text for every located line. Do not omit mathematical expressions.
-If JSON output is supported, use a words_info array where each item contains location and text.
-No explanation is needed."""
+LAYOUT_PROMPT = """Locate all text lines and return the coordinates of the rotated rectangle ([cx, cy, width, height, angle])."""
 
 
 def _find_words_info(value: Any) -> list[dict[str, Any]]:
@@ -95,6 +93,55 @@ def _find_words_info(value: Any) -> list[dict[str, Any]]:
             if found:
                 return found
     return []
+
+
+def _find_position_items(value: Any) -> list[dict[str, Any]]:
+    """Recover position-only output such as the documented `pos_list` fallback."""
+    found: list[dict[str, Any]] = []
+    if isinstance(value, dict):
+        pos_list = value.get("pos_list")
+        if isinstance(pos_list, list):
+            for item in pos_list:
+                if isinstance(item, dict) and (isinstance(item.get("rotate_rect"), list) or isinstance(item.get("location"), list)):
+                    found.append(item)
+        # Common generic vision box names from OpenAI-compatible gateways.
+        if any(isinstance(value.get(k), list) for k in ("rotate_rect", "location", "bbox", "bbox_2d", "box", "coordinates")):
+            found.append(value)
+        for child in value.values():
+            found.extend(_find_position_items(child))
+    elif isinstance(value, list):
+        for child in value:
+            found.extend(_find_position_items(child))
+    # De-duplicate by serialized geometry.
+    unique: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in found:
+        key = json.dumps({k: item.get(k) for k in ("rotate_rect", "location", "bbox", "bbox_2d", "box", "coordinates")}, sort_keys=True, default=str)
+        if key not in seen:
+            seen.add(key)
+            unique.append(item)
+    return unique
+
+
+def _rotated_rect_envelope(rect: list[Any]) -> tuple[float, float, float, float] | None:
+    """Convert [cx,cy,w,h,angle] to an axis-aligned envelope, respecting rotation."""
+    if len(rect) < 4:
+        return None
+    try:
+        cx, cy, rw, rh = map(float, rect[:4])
+        angle = float(rect[4]) if len(rect) >= 5 else 0.0
+    except (TypeError, ValueError):
+        return None
+    theta = math.radians(angle)
+    c, sn = math.cos(theta), math.sin(theta)
+    corners = []
+    for dx, dy in ((-rw/2, -rh/2), (rw/2, -rh/2), (rw/2, rh/2), (-rw/2, rh/2)):
+        x = cx + dx*c - dy*sn
+        y = cy + dx*sn + dy*c
+        corners.append((x, y))
+    xs = [x for x, _ in corners]
+    ys = [y for _, y in corners]
+    return min(xs), min(ys), max(xs), max(ys)
 
 
 
@@ -188,22 +235,37 @@ class QwenOCRClient:
             "temperature": 0,
             "max_tokens": 6144,
             "provider": self._provider(),
+            # Forward the vendor-native task when the gateway supports it.
+            # If TrustedRouter rejects the non-standard field, retry with the
+            # documented fixed prompt, which returns a `pos_list` fallback.
+            "ocr_options": {"task": "advanced_recognition"},
         }
-        raw = await self._post(payload)
+        try:
+            raw = await self._post(payload)
+        except QwenOCRError as exc:
+            if any(code in str(exc) for code in (" 400:", " 404:", " 422:")):
+                payload.pop("ocr_options", None)
+                raw = await self._post(payload)
+            else:
+                raise
 
         # First prefer provider-native advanced-recognition payloads. TrustedRouter
         # may preserve an `ocr_result.words_info` object instead of serializing it
         # into message text.
         items = _find_words_info(raw)
         text = _extract_text(raw)
-        if not items and text:
+        parsed: Any = None
+        if text:
             try:
                 parsed = json.loads(_clean_json_text(text))
-                items = _find_words_info(parsed)
             except Exception:
-                # Some gateways may return prose around the JSON. If it cannot be
-                # parsed, leave the list empty and let the pipeline preserve/rescue.
-                items = []
+                parsed = None
+        if not items and parsed is not None:
+            items = _find_words_info(parsed)
+        if not items:
+            # OpenAI-compatible Qwen OCR can return the official position-only
+            # `pos_list` in message text while the richer `ocr_result` is omitted.
+            items = _find_position_items(parsed if parsed is not None else raw)
 
         with Image.open(image_path) as im:
             width, height = im.size
@@ -217,6 +279,11 @@ class QwenOCRClient:
             # corners. Custom JSON fallbacks may instead return a normalized bbox.
             location = item.get("location")
             bbox = item.get("bbox")
+            if not isinstance(bbox, list):
+                for key in ("bbox_2d", "box", "coordinates"):
+                    if isinstance(item.get(key), list):
+                        bbox = item.get(key)
+                        break
             rotate_rect = item.get("rotate_rect")
             coords = location if isinstance(location, list) else bbox if isinstance(bbox, list) else []
 
@@ -233,9 +300,10 @@ class QwenOCRClient:
                         x1, x2 = x1 * width / 1000.0, x2 * width / 1000.0
                         y1, y2 = y1 * height / 1000.0, y2 * height / 1000.0
                 elif isinstance(rotate_rect, list) and len(rotate_rect) >= 4:
-                    cx, cy, rw, rh = map(float, rotate_rect[:4])
-                    # Axis-aligned envelope is enough for our deterministic renderer.
-                    x1, y1, x2, y2 = cx - rw / 2, cy - rh / 2, cx + rw / 2, cy + rh / 2
+                    envelope = _rotated_rect_envelope(rotate_rect)
+                    if envelope is None:
+                        continue
+                    x1, y1, x2, y2 = envelope
                 else:
                     continue
             except (TypeError, ValueError):
@@ -245,9 +313,7 @@ class QwenOCRClient:
             y1, y2 = sorted((max(0.0, y1), min(float(height), y2)))
             if x2 - x1 < 2 or y2 - y1 < 2:
                 continue
-            recognized = str(item.get("text", "")).strip()
-            if not recognized:
-                continue
+            recognized = str(item.get("text", item.get("word", ""))).strip()
             words.append({
                 "location": [x1, y1, x2, y1, x2, y2, x1, y2],
                 "text": recognized,

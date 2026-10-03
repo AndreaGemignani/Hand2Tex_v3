@@ -46,7 +46,7 @@ class Settings:
     trustedrouter_base_url: str = field(
         default_factory=lambda: os.getenv("TRUSTEDROUTER_BASE_URL", "https://api.trustedrouter.com/v1").rstrip("/")
     )
-    qwen_ocr_model: str = field(default_factory=lambda: os.getenv("QWEN_OCR_MODEL", "qwen/qwen-vl-ocr"))
+    qwen_ocr_model: str = field(default_factory=lambda: os.getenv("QWEN_OCR_MODEL", "qwen/qwen-vl-ocr-2025-11-20"))
     qwen_rescue_model: str = field(default_factory=lambda: os.getenv("QWEN_RESCUE_MODEL", "qwen/qwen3.8-max"))
     qwen_concurrency: int = field(default_factory=lambda: _int("QWEN_CONCURRENCY", 4))
     qwen_timeout_s: int = field(default_factory=lambda: _int("QWEN_TIMEOUT_S", 120))

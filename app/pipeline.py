@@ -49,8 +49,6 @@ def _qwen_words_to_blocks(words: list[dict[str, Any]], page_index: int) -> list[
         except (TypeError, ValueError):
             continue
         text = str(item.get("text", "")).strip()
-        if not text:
-            continue
         raw_category = str(item.get("category", "")).strip().lower()
         if raw_category in {"math", "formula", "equation", "matrix"}:
             category = "math"
@@ -59,7 +57,9 @@ def _qwen_words_to_blocks(words: list[dict[str, Any]], page_index: int) -> list[
         elif raw_category in {"text", "title", "heading", "paragraph", "label"}:
             category = "text"
         else:
-            category = "math" if _looks_math(text) else "text"
+            # Position-only advanced-recognition output has no text. Start as text;
+            # after decoding, math-like crops are automatically re-run as formula OCR.
+            category = "math" if text and _looks_math(text) else "text"
         blocks.append(
             LayoutBlock(
                 id=f"p{page_index:04d}_q{idx:04d}",
@@ -161,6 +161,19 @@ class Hand2TeXPipeline:
                 unit.usage_events.append({"provider": "qwen_ocr", **(result.usage or {})})
                 unit.decoder = f"qwen-ocr:{unit.category}"
                 unit.validation_score = validate(unit.category, unit.decoded)
+
+                # If a position-only layout box was provisionally treated as text
+                # but its OCR clearly looks mathematical, run the formula decoder
+                # on that crop and keep the better structured result.
+                if unit.category == "text" and not unit.hint_text.strip() and _looks_math(unit.decoded):
+                    math_result = await self.qwen.decode(Path(unit.crop_path), "math")
+                    math_score = validate("math", math_result.text)
+                    unit.usage_events.append({"provider": "qwen_ocr", **(math_result.usage or {})})
+                    if math_score >= unit.validation_score:
+                        unit.category = "math"
+                        unit.decoded = math_result.text
+                        unit.decoder = "qwen-ocr:math-auto"
+                        unit.validation_score = math_score
             except Exception as exc:
                 unit.decoded = unit.decoded or ""
                 unit.decoder = f"qwen-ocr-error:{type(exc).__name__}"

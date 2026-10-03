@@ -30,7 +30,7 @@ async def test_qwen_formula_payload(monkeypatch, tmp_path):
     client = QwenOCRClient(settings(monkeypatch), transport=httpx.MockTransport(handler))
     result = await client.decode(img, "math")
     assert result.text == r"\frac{a}{b}"
-    assert seen["model"] == "qwen/qwen-vl-ocr"
+    assert seen["model"] == "qwen/qwen-vl-ocr-2025-11-20"
     assert seen["provider"]["sort"] == "price"
     assert seen["messages"][0]["content"][1]["type"] == "image_url"
 
@@ -99,3 +99,53 @@ async def test_qwen_layout_nested_ocr_result_pixels(monkeypatch, tmp_path):
     # Official advanced-recognition `location` values are pixel coordinates.
     assert result.words_info[0]["location"][0] == 100
     assert result.words_info[0]["location"][1] == 200
+
+
+@pytest.mark.asyncio
+async def test_qwen_layout_position_only_pos_list(monkeypatch, tmp_path):
+    img = tmp_path / "page_pos.png"
+    Image.new("RGB", (1600, 900), "white").save(img)
+    calls = []
+
+    async def handler(request):
+        body = json.loads(request.content)
+        calls.append(body)
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": "```json\n[{\"pos_list\":[{\"rotate_rect\":[800,200,40,1200,-90]},{\"rotate_rect\":[800,300,40,1000,-90]}]}]\n```"}}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 20},
+        })
+
+    client = QwenOCRClient(settings(monkeypatch), transport=httpx.MockTransport(handler))
+    result = await client.locate_text_lines(img)
+    assert len(result.words_info) == 2
+    # Rotated -90 degrees: long dimension must become horizontal, not vertical.
+    first = result.words_info[0]["location"]
+    assert first[4] - first[0] > 1000
+    assert first[5] - first[1] < 100
+    assert result.words_info[0]["text"] == ""
+    assert calls[0]["ocr_options"]["task"] == "advanced_recognition"
+
+
+@pytest.mark.asyncio
+async def test_qwen_layout_retries_if_router_rejects_ocr_options(monkeypatch, tmp_path):
+    img = tmp_path / "page_retry.png"
+    Image.new("RGB", (400, 300), "white").save(img)
+    count = 0
+
+    async def handler(request):
+        nonlocal count
+        count += 1
+        body = json.loads(request.content)
+        if count == 1:
+            assert "ocr_options" in body
+            return httpx.Response(400, text="unsupported field ocr_options")
+        assert "ocr_options" not in body
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": "```json\n[{\"pos_list\":[{\"rotate_rect\":[200,100,20,250,-90]}]}]\n```"}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+        })
+
+    client = QwenOCRClient(settings(monkeypatch), transport=httpx.MockTransport(handler))
+    result = await client.locate_text_lines(img)
+    assert count == 2
+    assert len(result.words_info) == 1

@@ -1,3 +1,5 @@
+# Hand2TeX V2.8
+
 # Hand2TeX V2.5 — TrustedRouter
 
 Pipeline: **DETECT → PACK → DECODE → REBUILD**.
@@ -59,3 +61,13 @@ docker run --rm -p 8000:10000 \
 pip install -r requirements-dev.txt
 pytest -q
 ```
+
+
+## V2.8 layout compatibility fix
+
+- Uses `qwen/qwen-vl-ocr-2025-11-20` for deterministic advanced-recognition support.
+- Requests native `ocr_options.task=advanced_recognition` through TrustedRouter when supported.
+- Falls back automatically to the documented prompt if the gateway rejects vendor-specific parameters.
+- Parses both native `words_info` and OpenAI-compatible `pos_list`/`rotate_rect` output.
+- Correctly converts rotated rectangles into axis-aligned page boxes.
+- Position-only boxes are decoded afterward; math-like crops are automatically reprocessed as LaTeX math.

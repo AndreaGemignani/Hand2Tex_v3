@@ -11,7 +11,7 @@ services:
       - key: TRUSTEDROUTER_BASE_URL
         value: https://api.trustedrouter.com/v1
       - key: QWEN_OCR_MODEL
-        value: qwen/qwen-vl-ocr
+        value: qwen/qwen-vl-ocr-2025-11-20
       - key: QWEN_RESCUE_MODEL
         value: qwen/qwen3.8-max
       - key: TRUSTEDROUTER_SORT
