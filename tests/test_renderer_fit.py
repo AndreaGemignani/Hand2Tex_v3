@@ -112,13 +112,23 @@ def expected_pdf_box(bbox, page_size):
     )
 
 
-def assert_words_inside(words, box, tolerance=1):
-    assert words
-    for word in words:
-        assert word[0] >= box.x0 - tolerance
-        assert word[1] >= box.y0 - tolerance
-        assert word[2] <= box.x1 + tolerance
-        assert word[3] <= box.y1 + tolerance
+def assert_ink_inside(page, box, clip=None, tolerance=1):
+    # Extracted word boxes describe font metrics, not visible glyph outlines.
+    # In particular, TeX's radical font has a displaced PDF text origin. Check
+    # the rendered ink at 4x resolution while testing extracted content below.
+    scale = 4
+    pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale), colorspace=fitz.csGRAY, clip=clip)
+    image = Image.frombytes("L", (pixmap.width, pixmap.height), pixmap.samples)
+    bounds = image.point(lambda value: 255 if value < 224 else 0).getbbox()
+    assert bounds, "No visible text in the compiled PDF"
+    ink = fitz.Rect(
+        (pixmap.x + bounds[0]) / scale, (pixmap.y + bounds[1]) / scale,
+        (pixmap.x + bounds[2]) / scale, (pixmap.y + bounds[3]) / scale,
+    )
+    assert ink.x0 >= box.x0 - tolerance, (ink, box)
+    assert ink.y0 >= box.y0 - tolerance, (ink, box)
+    assert ink.x1 <= box.x1 + tolerance, (ink, box)
+    assert ink.y1 <= box.y1 + tolerance, (ink, box)
 
 
 @pytest.mark.skipif(shutil.which("pdflatex") is None, reason="pdflatex unavailable in test host")
@@ -134,7 +144,7 @@ def test_real_pdf_long_or_narrow_text_stays_inside_original_box(tmp_path, bbox, 
         words = document[0].get_text("words")
         assert any(word[4] == "ALPHA" for word in words)
         assert any(word[4] == "OMEGA" for word in words)
-        assert_words_inside(words, expected_pdf_box(bbox, (1000, 1400)))
+        assert_ink_inside(document[0], expected_pdf_box(bbox, (1000, 1400)))
 
 
 @pytest.mark.skipif(shutil.which("pdflatex") is None, reason="pdflatex unavailable in test host")
@@ -150,9 +160,12 @@ def test_real_pdf_overlapping_envelopes_do_not_overlap_rendered_words(tmp_path):
         assert len(first_words) == 35 and len(second_words) == 35
         first_box = expected_pdf_box(first.bbox, page_size)
         first_box.y1 = second.bbox.y1 / page_size[1] * A4_H_MM * 72 / 25.4
-        assert_words_inside(first_words, first_box)
-        assert_words_inside(second_words, expected_pdf_box(second.bbox, page_size))
         assert max(word[3] for word in first_words) < min(word[1] for word in second_words)
+        separation = (max(word[3] for word in first_words) + min(word[1] for word in second_words)) / 2
+        page = document[0]
+        assert_ink_inside(page, first_box, fitz.Rect(0, 0, page.rect.width, separation))
+        assert_ink_inside(page, expected_pdf_box(second.bbox, page_size),
+                          fitz.Rect(0, separation, page.rect.width, page.rect.height))
 
 
 @pytest.mark.skipif(shutil.which("pdflatex") is None, reason="pdflatex unavailable in test host")
@@ -163,4 +176,4 @@ def test_real_pdf_narrow_wrapped_radical_renders_without_literal_latex_or_overfl
         text = document[0].get_text()
         assert "sqrt" not in text and "$" not in text
         assert "3" in text
-        assert_words_inside(document[0].get_text("words"), expected_pdf_box(bbox, (1663, 2420)))
+        assert_ink_inside(document[0], expected_pdf_box(bbox, (1663, 2420)))
