@@ -64,6 +64,13 @@ def test_nested_equation_and_split_keep_alignment_and_formula_content():
     assert clean_math(source) == r"\begin{aligned}x&=y+z\\&=1+2\end{aligned}"
 
 
+def test_environment_after_row_break_is_converted_without_changing_the_break():
+    source = r"\begin{align*}x&=1\\\end{align*}"
+    assert clean_math(source) == r"\begin{aligned}x&=1\\\end{aligned}"
+    escaped = r"\\begin{align*}x=1\\end{align*}"
+    assert clean_math(escaped) == escaped
+
+
 def math_unit(identifier, formula, bbox):
     return ProcessingUnit(
         identifier, 0, "math", bbox, [identifier], .95,

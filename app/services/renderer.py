@@ -54,12 +54,14 @@ def clean_math(text: str) -> str:
     }
 
     def inner_environment(match: re.Match[str]) -> str:
-        command, environment = match.groups()
+        linebreaks, command, environment = match.groups()
         replacement = inner_environments[environment.rstrip("*")]
-        return rf"\{command}{{{replacement}}}" if replacement else ""
+        return linebreaks + (rf"\{command}{{{replacement}}}" if replacement else "")
 
     value = re.sub(
-        r"(?<!\\)\\(begin|end)\s*\{(equation\*?|displaymath|align\*?|eqnarray\*?|split|alignat\*?|gather\*?|multline\*?)\}",
+        # An environment command may immediately follow a \\ row break. Match
+        # pairs of preceding backslashes so the real command is still converted.
+        r"(?<!\\)((?:\\\\)*)\\(begin|end)\s*\{(equation\*?|displaymath|align\*?|eqnarray\*?|split|alignat\*?|gather\*?|multline\*?)\}",
         inner_environment, value,
     )
     return value.strip()
