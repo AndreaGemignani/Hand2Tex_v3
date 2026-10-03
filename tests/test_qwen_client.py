@@ -77,3 +77,25 @@ async def test_qwen_layout_json(monkeypatch, tmp_path):
     assert result.words_info[0]["location"][0] == 10
     assert result.words_info[0]["location"][1] == 10
     assert result.words_info[1]["category"] == "math"
+
+@pytest.mark.asyncio
+async def test_qwen_layout_nested_ocr_result_pixels(monkeypatch, tmp_path):
+    img = tmp_path / "page_nested.png"
+    Image.new("RGB", (1663, 2420), "white").save(img)
+
+    async def handler(request):
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": [
+                {"ocr_result": {"words_info": [
+                    {"location": [100, 200, 900, 200, 900, 260, 100, 260], "text": "Simple handwritten text"}
+                ]}}
+            ]}}],
+            "usage": {"prompt_tokens": 20, "completion_tokens": 5},
+        })
+
+    client = QwenOCRClient(settings(monkeypatch), transport=httpx.MockTransport(handler))
+    result = await client.locate_text_lines(img)
+    assert result.words_info[0]["text"] == "Simple handwritten text"
+    # Official advanced-recognition `location` values are pixel coordinates.
+    assert result.words_info[0]["location"][0] == 100
+    assert result.words_info[0]["location"][1] == 200

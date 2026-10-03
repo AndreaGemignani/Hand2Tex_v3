@@ -68,18 +68,34 @@ DECODE_PROMPTS = {
     ),
 }
 
-LAYOUT_PROMPT = """Analyze the page only for document layout and transcription.
-Return ONLY compact JSON with this exact schema:
-{"words_info":[{"bbox":[x1,y1,x2,y2],"category":"text|math|table","text":"content"}]}
-Rules:
-- bbox coordinates are normalized integers from 0 to 1000 relative to the full image.
-- Include every text, equation/formula/matrix, and table region.
-- category=text for prose/headings/labels, math for formulas/matrices/systems, table for real tabular data.
-- Do NOT include drawings, diagrams, sketches, photos, axes, arrows, or decorative marks; those are preserved separately.
-- Merge consecutive lines only when they clearly form one paragraph or one mathematical sequence.
-- Preserve transcription exactly. Do not translate or correct.
-- JSON only. No markdown and no explanation.
-"""
+LAYOUT_PROMPT = """Locate all text lines and return the coordinates of the rotated rectangle ([cx, cy, width, height, angle]).
+Return the recognized text for every located line. Do not omit mathematical expressions.
+If JSON output is supported, use a words_info array where each item contains location and text.
+No explanation is needed."""
+
+
+def _find_words_info(value: Any) -> list[dict[str, Any]]:
+    """Find a words_info list in provider-native or OpenAI-compatible responses.
+
+    Qwen OCR gateways may expose the advanced-recognition result either as
+    message text JSON or as a nested `ocr_result` object. Keep the parser
+    provider-agnostic so the routing layer does not depend on one gateway.
+    """
+    if isinstance(value, dict):
+        direct = value.get("words_info")
+        if isinstance(direct, list):
+            return [item for item in direct if isinstance(item, dict)]
+        for child in value.values():
+            found = _find_words_info(child)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for child in value:
+            found = _find_words_info(child)
+            if found:
+                return found
+    return []
+
 
 
 @dataclass
@@ -174,14 +190,20 @@ class QwenOCRClient:
             "provider": self._provider(),
         }
         raw = await self._post(payload)
+
+        # First prefer provider-native advanced-recognition payloads. TrustedRouter
+        # may preserve an `ocr_result.words_info` object instead of serializing it
+        # into message text.
+        items = _find_words_info(raw)
         text = _extract_text(raw)
-        try:
-            parsed = json.loads(_clean_json_text(text))
-            items = parsed.get("words_info", []) if isinstance(parsed, dict) else []
-            if not isinstance(items, list):
+        if not items and text:
+            try:
+                parsed = json.loads(_clean_json_text(text))
+                items = _find_words_info(parsed)
+            except Exception:
+                # Some gateways may return prose around the JSON. If it cannot be
+                # parsed, leave the list empty and let the pipeline preserve/rescue.
                 items = []
-        except Exception as exc:
-            raise QwenOCRError(f"Could not parse Qwen layout JSON: {text[:800]}") from exc
 
         with Image.open(image_path) as im:
             width, height = im.size
@@ -190,30 +212,47 @@ class QwenOCRClient:
         for item in items:
             if not isinstance(item, dict):
                 continue
-            bbox = item.get("bbox") or item.get("location") or []
-            if not isinstance(bbox, list) or len(bbox) not in {4, 8}:
-                continue
+
+            # Official Qwen advanced_recognition returns `location` as four pixel
+            # corners. Custom JSON fallbacks may instead return a normalized bbox.
+            location = item.get("location")
+            bbox = item.get("bbox")
+            rotate_rect = item.get("rotate_rect")
+            coords = location if isinstance(location, list) else bbox if isinstance(bbox, list) else []
+
             try:
-                if len(bbox) == 8:
-                    xs = [float(bbox[i]) for i in (0, 2, 4, 6)]
-                    ys = [float(bbox[i]) for i in (1, 3, 5, 7)]
+                if isinstance(coords, list) and len(coords) == 8:
+                    xs = [float(coords[i]) for i in (0, 2, 4, 6)]
+                    ys = [float(coords[i]) for i in (1, 3, 5, 7)]
                     x1, y1, x2, y2 = min(xs), min(ys), max(xs), max(ys)
+                    # `location` is already in image pixels in the official task.
+                elif isinstance(coords, list) and len(coords) == 4:
+                    x1, y1, x2, y2 = map(float, coords)
+                    # Only our custom bbox convention is normalized 0..1000.
+                    if bbox is not None and max(abs(x1), abs(x2), abs(y1), abs(y2)) <= 1000:
+                        x1, x2 = x1 * width / 1000.0, x2 * width / 1000.0
+                        y1, y2 = y1 * height / 1000.0, y2 * height / 1000.0
+                elif isinstance(rotate_rect, list) and len(rotate_rect) >= 4:
+                    cx, cy, rw, rh = map(float, rotate_rect[:4])
+                    # Axis-aligned envelope is enough for our deterministic renderer.
+                    x1, y1, x2, y2 = cx - rw / 2, cy - rh / 2, cx + rw / 2, cy + rh / 2
                 else:
-                    x1, y1, x2, y2 = map(float, bbox)
+                    continue
             except (TypeError, ValueError):
                 continue
-            # Prompt asks for normalized 0..1000 coordinates. Be forgiving if a
-            # provider returns actual pixel coordinates instead.
-            if max(abs(x1), abs(x2)) <= 1000 and max(abs(y1), abs(y2)) <= 1000:
-                x1, x2 = x1 * width / 1000.0, x2 * width / 1000.0
-                y1, y2 = y1 * height / 1000.0, y2 * height / 1000.0
+
             x1, x2 = sorted((max(0.0, x1), min(float(width), x2)))
             y1, y2 = sorted((max(0.0, y1), min(float(height), y2)))
             if x2 - x1 < 2 or y2 - y1 < 2:
                 continue
+            recognized = str(item.get("text", "")).strip()
+            if not recognized:
+                continue
             words.append({
                 "location": [x1, y1, x2, y1, x2, y2, x1, y2],
-                "text": str(item.get("text", "")).strip(),
-                "category": str(item.get("category", "text")).strip().lower(),
+                "text": recognized,
+                # Qwen advanced_recognition does not classify regions; downstream
+                # heuristics classify math/text without another model call.
+                "category": str(item.get("category", "")).strip().lower(),
             })
         return LocateResult(words_info=words, usage=raw.get("usage") or {}, raw=raw)
