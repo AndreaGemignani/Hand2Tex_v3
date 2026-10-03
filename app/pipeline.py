@@ -407,7 +407,17 @@ class Hand2TeXPipeline:
             (result_dir / "layout_rescue_raw.json").write_text(json.dumps(raw_rescues, ensure_ascii=False, indent=2), encoding="utf-8")
         # Keep decoded text, routing and costs available in a diagnostic ZIP even
         # if the external PDF compiler fails.
-        compilation = compile_pdf(tex_path)
+        try:
+            compilation = compile_pdf(tex_path)
+        except Exception as exc:
+            manifest["status"] = "error"
+            manifest["compilation"] = {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+            (result_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+            raise
+        manifest["compilation"] = {"ok": bool(compilation.get("ok")), "reason": compilation.get("reason")}
+        if not compilation.get("ok"):
+            manifest["status"] = "error"
+        (result_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
         if not compilation.get("ok"):
             raise PipelineError(f"LaTeX compilation failed: {compilation.get('reason')}. See compile.log")
         return {"result_dir": result_dir, "manifest": manifest, "compilation": compilation}

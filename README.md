@@ -1,4 +1,4 @@
-# Hand2TeX V2.11 DEBUG — TrustedRouter
+# Hand2TeX V2.12 DEBUG — TrustedRouter
 
 Pipeline: **DETECT → PACK → DECODE → REBUILD**.
 
@@ -10,6 +10,14 @@ The selected models are unchanged:
 - Final placement is deterministic LaTeX; no LLM is used to improvise the page layout.
 
 Qwen calls go through the OpenAI-compatible **TrustedRouter** gateway. V2.10 adds support for the position-only response captured by V2.9 diagnostics. Provider, models, request prompts and rendering architecture are unchanged.
+
+## V2.12: display math inside positioned boxes
+
+The next captured run reached formula rendering but failed with `Bad math environment delimiter`. The mathematical OCR returned both an `equation` and an `align*` environment; each opens display math, so neither can be placed directly inside the renderer's existing math box.
+
+The renderer now removes `equation`/`equation*` and `displaymath` wrappers and converts multiline display environments to their inner equivalents (`align` to `aligned`, `gather`/`multline` to `gathered`, and `alignat` to `alignedat`). Formula content, alignment markers, matrix environments and box positions are preserved. Synthetic regression cases reproduce both structures from the captured output and compile with real TeX Live in GitHub Actions.
+
+`manifest.json` now records the PDF compilation outcome and changes its status to `error` if compilation fails, matching `diagnostic_error.json`. Saved decoding and cost details remain available. This correction changes no model, prompt or provider and performs no new OCR requests.
 
 ## V2.11: OCR paragraphs and math rendering
 

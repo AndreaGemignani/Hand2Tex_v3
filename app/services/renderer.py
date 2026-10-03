@@ -44,7 +44,25 @@ def clean_math(text: str) -> str:
             position += 1
     if segments and position == len(value):
         value = r"\quad ".join(segment for segment in segments if segment)
-    return value
+    # Display environments open their own math mode and cannot be nested in the
+    # resizebox's $...$. Keep their formula content and use inner environments
+    # for row/column alignment. Existing matrices, arrays and aligned stay intact.
+    inner_environments = {
+        "equation": "", "displaymath": "",
+        "align": "aligned", "eqnarray": "aligned", "split": "aligned",
+        "alignat": "alignedat", "gather": "gathered", "multline": "gathered",
+    }
+
+    def inner_environment(match: re.Match[str]) -> str:
+        command, environment = match.groups()
+        replacement = inner_environments[environment.rstrip("*")]
+        return rf"\{command}{{{replacement}}}" if replacement else ""
+
+    value = re.sub(
+        r"(?<!\\)\\(begin|end)\s*\{(equation\*?|displaymath|align\*?|eqnarray\*?|split|alignat\*?|gather\*?|multline\*?)\}",
+        inner_environment, value,
+    )
+    return value.strip()
 
 
 def _font_size_for(unit: ProcessingUnit, page_h: int, text: str) -> float:

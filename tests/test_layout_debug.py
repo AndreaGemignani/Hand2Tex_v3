@@ -300,9 +300,12 @@ async def test_concurrent_conversions_keep_diagnostics_separate(
 
 
 @pytest.mark.asyncio
-async def test_layout_diagnostics_remain_when_compilation_fails(settings, monkeypatch, tmp_path):
+@pytest.mark.parametrize("compiler_raises", [False, True])
+async def test_layout_diagnostics_remain_when_compilation_fails(settings, monkeypatch, tmp_path, compiler_raises):
     def failed_compilation(tex_path):
         (tex_path.parent / "compile.log").write_text("TeX compiler failed", encoding="utf-8")
+        if compiler_raises:
+            raise TimeoutError("Compiler timed out")
         return {"ok": False, "reason": "pdflatex failed", "pdf": None}
 
     monkeypatch.setattr(pipeline_module, "compile_pdf", failed_compilation)
@@ -311,7 +314,9 @@ async def test_layout_diagnostics_remain_when_compilation_fails(settings, monkey
         return httpx.Response(200, json=layout_response())
 
     work_dir = tmp_path / "work"
-    with pytest.raises(PipelineError, match="LaTeX compilation failed"):
+    error_type = TimeoutError if compiler_raises else PipelineError
+    message = "Compiler timed out" if compiler_raises else "LaTeX compilation failed"
+    with pytest.raises(error_type, match=message):
         await real_pipeline(settings, handler).run(
             [image_file(tmp_path)], work_dir, "Compilation failure", include_debug=True,
         )
@@ -323,3 +328,6 @@ async def test_layout_diagnostics_remain_when_compilation_fails(settings, monkey
     assert (work_dir / "result" / "layout.json").exists()
     manifest = json.loads((work_dir / "result" / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["cost_estimate"]["qwen_ocr_input_tokens"] == 100
+    assert manifest["status"] == "error"
+    reason = "TimeoutError: Compiler timed out" if compiler_raises else "pdflatex failed"
+    assert manifest["compilation"] == {"ok": False, "reason": reason}
