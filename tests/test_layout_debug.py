@@ -10,7 +10,7 @@ from PIL import Image
 import app.pipeline as pipeline_module
 from app.config import Settings
 from app.pipeline import Hand2TeXPipeline, PipelineError
-from app.services.layout_diagnostics import LayoutDiagnostics
+from app.services.layout_diagnostics import DEBUG_VERSION, LayoutDiagnostics
 from app.services.qwen_ocr import QwenOCRClient
 
 
@@ -68,7 +68,7 @@ def read_diagnostics(result_dir):
     documents = {}
     for name in DEBUG_FILES:
         documents[name] = json.loads((result_dir / name).read_text(encoding="utf-8"))
-        assert documents[name]["version"] == "2.9-debug"
+        assert documents[name]["version"] == DEBUG_VERSION
     return documents
 
 

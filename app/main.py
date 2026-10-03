@@ -18,7 +18,7 @@ from app.services.layout_diagnostics import DEBUG_VERSION, redact_sensitive
 BASE = Path(__file__).resolve().parent
 STATIC = BASE / "static"
 settings = Settings()
-app = FastAPI(title=settings.app_name, version="0.2.9")
+app = FastAPI(title=settings.app_name, version="0.2.10")
 pipeline = Hand2TeXPipeline(settings)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 

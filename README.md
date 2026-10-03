@@ -1,4 +1,4 @@
-# Hand2TeX V2.9 DEBUG — TrustedRouter
+# Hand2TeX V2.10 DEBUG — TrustedRouter
 
 Pipeline: **DETECT → PACK → DECODE → REBUILD**.
 
@@ -9,7 +9,17 @@ The selected models are unchanged:
 - Drawings/figures are preserved as original pixels.
 - Final placement is deterministic LaTeX; no LLM is used to improvise the page layout.
 
-Qwen calls go through the OpenAI-compatible **TrustedRouter** gateway. V2.9 adds layout diagnostics; the provider, models, request prompts, OCR parser and rendering architecture remain the same as V2.8.
+Qwen calls go through the OpenAI-compatible **TrustedRouter** gateway. V2.10 adds support for the position-only response captured by V2.9 diagnostics. Provider, models, request prompts and rendering architecture are unchanged.
+
+## V2.10: parse the observed layout response
+
+The real TrustedRouter response contained **44 comma-separated rows**, each with `cx,cy,width,height,angle`, instead of a JSON `words_info` or `pos_list` object. The previous parser discarded this listing and preserved the whole page as an image.
+
+The parser now accepts a complete numeric CSV listing, including an optional CSV/text code fence. In this output, the first four values use the model's normalized 0..1000 coordinate space. It computes the rotated rectangle's envelope in that space, then scales each axis to the original page dimensions and clips it to the page. Native JSON coordinates retain their existing interpretation. Invalid rows, non-finite coordinates and non-positive dimensions are rejected.
+
+The captured 1663×2420 test page now yields **44 usable boxes**. Their positions were checked against the original page, including its final line near the bottom. The coordinate-only regression fixture contains no image, handwriting transcription, credentials or request IDs.
+
+These boxes do not contain recognized text: the existing grouped crop decoding stage performs the transcription and math decoding afterward. RAW diagnostics remain enabled by default, and no additional model call is introduced by the parser.
 
 ## V2.9 DEBUG
 
@@ -63,10 +73,10 @@ Each conversion ZIP contains `main.pdf`, `main.tex`, `layout.json`, `decoded.jso
 ## Local test
 
 ```bash
-docker build -t hand2tex-v29 .
+docker build -t hand2tex-v210 .
 docker run --rm -p 8000:10000 \
   -e TRUSTEDROUTER_API_KEY='YOUR_KEY' \
-  hand2tex-v29
+  hand2tex-v210
 ```
 
 ## Tests

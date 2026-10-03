@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from app import main as app_main
 from app.config import Settings
 from app.pipeline import PipelineError
-from app.services.layout_diagnostics import LayoutDiagnostics
+from app.services.layout_diagnostics import DEBUG_VERSION, LayoutDiagnostics
 
 
 API_KEY = "sk-tr-api-debug-secret"
@@ -111,7 +111,7 @@ def test_success_zip_reports_layout_status_and_enables_debug_by_default(
         diagnostics.for_page(0, 400, 600)
         parsed_status = "ok" if status == "ok" else "no_usable_boxes"
         parsed = {
-            "version": "2.9-debug",
+            "version": DEBUG_VERSION,
             "pages": [{
                 "page": 0, "width_px": 400, "height_px": 600,
                 "status": parsed_status, "words_info": [], "blocks": [],

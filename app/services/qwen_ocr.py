@@ -124,6 +124,38 @@ def _find_position_items(value: Any) -> list[dict[str, Any]]:
     return unique
 
 
+def _parse_plain_position_text(text: str) -> list[dict[str, Any]]:
+    """Read TrustedRouter's position-only CSV in the model's 0..1000 space.
+
+    The observed Qwen response has one cx,cy,width,height,angle row per line,
+    without a JSON wrapper or recognized text. Only accept a complete numeric
+    coordinate listing, so prose and mathematical transcriptions are not boxes.
+    Native JSON location/rotate_rect values keep their existing pixel semantics.
+    """
+    value = text.strip()
+    value = re.sub(r"^```(?:csv|text)?\s*", "", value, flags=re.IGNORECASE)
+    value = re.sub(r"\s*```$", "", value)
+    number = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?"
+    items: list[dict[str, Any]] = []
+    for line in value.splitlines():
+        if not line.strip():
+            continue
+        fields = [field.strip() for field in line.split(",")]
+        if len(fields) != 5 or not all(re.fullmatch(number, field) for field in fields):
+            return []
+        rect = [float(field) for field in fields]
+        cx, cy, width, height, angle = rect
+        if (
+            not all(math.isfinite(coordinate) for coordinate in rect)
+            or not (0 <= cx <= 1000 and 0 <= cy <= 1000)
+            or width <= 0 or height <= 0
+            or not -90 <= angle <= 90
+        ):
+            return []
+        items.append({"rotate_rect": rect, "coordinate_space": "normalized_1000"})
+    return items
+
+
 def _rotated_rect_envelope(rect: list[Any]) -> tuple[float, float, float, float] | None:
     """Convert [cx,cy,w,h,angle] to an axis-aligned envelope, respecting rotation."""
     if len(rect) < 4:
@@ -132,6 +164,8 @@ def _rotated_rect_envelope(rect: list[Any]) -> tuple[float, float, float, float]
         cx, cy, rw, rh = map(float, rect[:4])
         angle = float(rect[4]) if len(rect) >= 5 else 0.0
     except (TypeError, ValueError):
+        return None
+    if not all(math.isfinite(value) for value in (cx, cy, rw, rh, angle)) or rw <= 0 or rh <= 0:
         return None
     theta = math.radians(angle)
     c, sn = math.cos(theta), math.sin(theta)
@@ -231,8 +265,7 @@ class QwenOCRClient:
     async def locate_text_lines(self, image_path: Path, *, diagnostics: LayoutTrace | None = None) -> LocateResult:
         """Use the same Qwen-VL-OCR model via TrustedRouter to recover layout boxes.
 
-        The gateway is OpenAI-compatible, so we request compact normalized JSON rather
-        than relying on Alibaba-specific `advanced_recognition` request parameters.
+        The gateway may return native JSON or a position-only CSV listing.
         Drawings are intentionally omitted and later preserved as the residual layer.
         """
         if not self.available:
@@ -281,6 +314,8 @@ class QwenOCRClient:
             # OpenAI-compatible Qwen OCR can return the official position-only
             # `pos_list` in message text while the richer `ocr_result` is omitted.
             items = _find_position_items(parsed if parsed is not None else raw)
+        if not items and parsed is None:
+            items = _parse_plain_position_text(text)
 
         with Image.open(image_path) as im:
             width, height = im.size
@@ -319,13 +354,21 @@ class QwenOCRClient:
                     if envelope is None:
                         continue
                     x1, y1, x2, y2 = envelope
+                    if item.get("coordinate_space") == "normalized_1000":
+                        # Rotate in the model's coordinate space before restoring
+                        # the page's aspect ratio; scaling the rectangle first
+                        # would change its angle and give incorrect crops.
+                        x1, x2 = x1 * width / 1000.0, x2 * width / 1000.0
+                        y1, y2 = y1 * height / 1000.0, y2 * height / 1000.0
                 else:
                     continue
             except (TypeError, ValueError):
                 continue
 
-            x1, x2 = sorted((max(0.0, x1), min(float(width), x2)))
-            y1, y2 = sorted((max(0.0, y1), min(float(height), y2)))
+            if not all(math.isfinite(value) for value in (x1, y1, x2, y2)):
+                continue
+            x1, x2 = sorted((max(0.0, min(float(width), x1)), max(0.0, min(float(width), x2))))
+            y1, y2 = sorted((max(0.0, min(float(height), y1)), max(0.0, min(float(height), y2))))
             if x2 - x1 < 2 or y2 - y1 < 2:
                 continue
             recognized = str(item.get("text", item.get("word", ""))).strip()
