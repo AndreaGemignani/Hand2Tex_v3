@@ -54,6 +54,15 @@ class Settings:
     qwen_rescue_threshold: float = field(default_factory=lambda: _float("QWEN_RESCUE_THRESHOLD", 0.55))
     trustedrouter_sort: str = field(default_factory=lambda: os.getenv("TRUSTEDROUTER_SORT", "price").strip().lower())
 
+    # Syntax scores cannot detect a fluent but incorrect transcription. Review
+    # source-grounded content in compact batches, separately from cheap OCR.
+    enable_content_review: bool = field(default_factory=lambda: _bool("ENABLE_CONTENT_REVIEW", True))
+    content_review_model: str = field(default_factory=lambda: os.getenv("CONTENT_REVIEW_MODEL", os.getenv("QWEN_RESCUE_MODEL", "qwen/qwen3.8-max")).strip())
+    content_review_batch_size: int = field(default_factory=lambda: _int("CONTENT_REVIEW_BATCH_SIZE", 6))
+    content_review_max_pixels: int = field(default_factory=lambda: _int("CONTENT_REVIEW_MAX_PIXELS", 3_000_000))
+    content_review_max_input_chars: int = field(default_factory=lambda: _int("CONTENT_REVIEW_MAX_INPUT_CHARS", 12_000))
+    content_review_max_output_tokens: int = field(default_factory=lambda: _int("CONTENT_REVIEW_MAX_OUTPUT_TOKENS", 4096))
+
     mistral_api_key: str = field(default_factory=lambda: os.getenv("MISTRAL_API_KEY", ""))
     mistral_model: str = field(default_factory=lambda: os.getenv("MISTRAL_OCR_MODEL", "mistral-ocr-latest"))
     enable_mistral_layout_rescue: bool = field(default_factory=lambda: _bool("ENABLE_MISTRAL_LAYOUT_RESCUE", True))
@@ -70,6 +79,8 @@ class Settings:
     qwen_ocr_output_per_million_usd: float = field(default_factory=lambda: _float("QWEN_OCR_OUTPUT_PER_M_USD", 0.168))
     qwen_rescue_input_per_million_usd: float = field(default_factory=lambda: _float("QWEN_RESCUE_INPUT_PER_M_USD", 1.74075))
     qwen_rescue_output_per_million_usd: float = field(default_factory=lambda: _float("QWEN_RESCUE_OUTPUT_PER_M_USD", 5.223305))
+    content_review_input_per_million_usd: float = field(default_factory=lambda: _float("CONTENT_REVIEW_INPUT_PER_M_USD", _float("QWEN_RESCUE_INPUT_PER_M_USD", 1.74075)))
+    content_review_output_per_million_usd: float = field(default_factory=lambda: _float("CONTENT_REVIEW_OUTPUT_PER_M_USD", _float("QWEN_RESCUE_OUTPUT_PER_M_USD", 5.223305)))
     mistral_ocr_per_page_usd: float = field(default_factory=lambda: _float("MISTRAL_OCR_PER_PAGE_USD", 0.004))
 
     @property

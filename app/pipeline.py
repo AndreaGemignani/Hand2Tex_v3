@@ -13,12 +13,14 @@ from PIL import Image
 from app.config import Settings
 from app.models import BBox, DocumentLayout, LayoutBlock, PageLayout
 from app.services.costs import estimate_cost
-from app.services.crops import materialize_crops
+from app.services.content_review import ContentReviewClient, ReviewBatchResult, apply_review, plan_review_batches
+from app.services.crops import materialize_crops, materialize_review_crops
+from app.services.document_structure import reading_order
 from app.services.figure_extraction import background_color as _background_color, extract_figures, residual_image
 from app.services.grouping import build_processing_units
 from app.services.input_pages import render_inputs
 from app.services.jev_router import JevRouter
-from app.services.layout_diagnostics import DEBUG_VERSION, LayoutDiagnostics
+from app.services.layout_diagnostics import DEBUG_VERSION, LayoutDiagnostics, redact_sensitive
 from app.services.layout_detector import PaddleLayoutDetector
 from app.services.mistral_layout import MistralLayoutError, MistralLayoutRescue
 from app.services.qwen_ocr import QwenOCRClient
@@ -34,10 +36,11 @@ def _looks_math(text: str) -> bool:
     # A grouped paragraph can contain a few formulas among substantial prose.
     # Keep that prose in the text path instead of replacing it with math-only OCR.
     plain = re.sub(r"\\(?:begin|end)\{[^}]+\}", " ", value)
+    plain = re.sub(r"\\(?:text|textrm|mathrm|operatorname)\{[^}]*\}", " ", plain)
     plain = re.sub(r"\\[A-Za-z]+", " ", plain)
     math_words = {"sin", "cos", "tan", "cot", "sec", "csc", "log", "lim", "exp", "max", "min", "det", "mod"}
     prose_words = [word for word in re.findall(r"[^\W\d_]{3,}", plain, flags=re.UNICODE) if word.lower() not in math_words]
-    if len(prose_words) > 3:
+    if prose_words:
         return False
     math_chars = set("=+-×÷∫∑√∞≈≠≤≥^_()[]{}|<>∂∆λμπσθΩ")
     symbol_count = sum(ch in math_chars for ch in value)
@@ -113,6 +116,7 @@ class Hand2TeXPipeline:
         rescue: Any | None = None,
         mistral: Any | None = None,
         jev: Any | None = None,
+        reviewer: Any | None = None,
     ):
         self.settings = settings
         self._detector_injected = detector is not None
@@ -121,6 +125,105 @@ class Hand2TeXPipeline:
         self.rescue = rescue or QwenRescueClient(settings)
         self.mistral = mistral or MistralLayoutRescue(settings)
         self.jev = jev or JevRouter(settings)
+        self.reviewer = reviewer or ContentReviewClient(settings, transport=getattr(self.qwen, "transport", None))
+
+    async def _review_document(self, layout, result_dir, usage_events, semaphore, include_debug):
+        """Check source fidelity independently of the local syntax validator."""
+        units = [unit for page in layout.pages for unit in reading_order(page)]
+        typed = [unit for unit in units if unit.category in {"text", "math", "table"}]
+        typed_ids = {unit.id for unit in typed}
+        for unit in units:
+            unit.raw_decoded = unit.decoded
+            unit.quality_review = {
+                "status": "not_reviewed" if unit.id in typed_ids else "not_applicable",
+                "original_category": unit.category, "applied": False,
+                "issues": ["Image-grounded review disabled"] if unit.id in typed_ids else [],
+            }
+        batches = []
+        raw_batches = []
+        warnings = []
+        if self.settings.enable_content_review:
+            for unit in typed:
+                unit.quality_review.update(issues=["Source region could not be scheduled within the review budget"], mark_pdf=True)
+            if self.reviewer.available:
+                batches = plan_review_batches(
+                    typed, max_units=self.settings.content_review_batch_size,
+                    max_pixels=self.settings.content_review_max_pixels,
+                    max_input_chars=self.settings.content_review_max_input_chars,
+                )
+
+                async def review_batch(batch, number):
+                    try:
+                        async with semaphore:
+                            result = await self.reviewer.review(batch)
+                    except Exception as exc:
+                        result = ReviewBatchResult(
+                            model=self.settings.content_review_model,
+                            errors=[redact_sensitive(f"{type(exc).__name__}: {exc}", self.settings.trustedrouter_api_key)],
+                        )
+                    # One provider event per paid request, including rejected replies.
+                    usage_events.append({**result.usage, "provider": "content_review"})
+                    apply_review(batch, result)
+                    for unit in batch:
+                        if unit.quality_review.get("applied"):
+                            unit.validation_score = validate(unit.category, unit.decoded) if unit.decoded else 0.0
+                            if unit.quality_review["status"] == "corrected":
+                                unit.decoder += "+content-review"
+                        if result.errors:
+                            unit.quality_review["batch_errors"] = redact_sensitive(result.errors, self.settings.trustedrouter_api_key)
+                    raw_batches.append({
+                        "batch": number, "ids": [unit.id for unit in batch],
+                        "model": result.model, "usage": result.usage, "errors": result.errors,
+                        "response": result.raw,
+                    })
+
+                await asyncio.gather(*(review_batch(batch, number) for number, batch in enumerate(batches)))
+            else:
+                for unit in typed:
+                    unit.quality_review["issues"] = ["Image-grounded review unavailable"]
+            for unit in typed:
+                if unit.quality_review["status"] in {"uncertain", "not_reviewed"}:
+                    unit.quality_review["mark_pdf"] = True
+                    warnings.append({
+                        "page": unit.page, "stage": "content-review", "unit": unit.id,
+                        "warning": "Transcription needs verification against the original source.",
+                        "issues": unit.quality_review["issues"],
+                    })
+        # Include compact evidence in the download for inspecting corrections.
+        evidence = {}
+        if self.settings.enable_content_review:
+            for unit in typed:
+                if unit.review_crop_path and Path(unit.review_crop_path).is_file():
+                    target = result_dir / "review_crops" / f"page_{unit.page:04d}_{unit.id}.png"
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(unit.review_crop_path, target)
+                    evidence[unit.id] = target.relative_to(result_dir).as_posix()
+        summary = {
+            "enabled": self.settings.enable_content_review, "model": self.settings.content_review_model,
+            "batches": len(batches), "batch_count_kind": "planned", "regions": len(typed),
+            **{status: sum(unit.quality_review["status"] == status for unit in typed)
+               for status in ("verified", "corrected", "uncertain", "not_reviewed")},
+            "merged_regions": sum(bool(unit.quality_review.get("merged_into")) for unit in typed),
+            "report": "quality_review.json",
+        }
+        report = {
+            "version": DEBUG_VERSION, "summary": summary, "validation_kind": "image-grounded-content",
+            "units": [{
+                "id": unit.id, "page": unit.page, "original_text": unit.raw_decoded,
+                "text": unit.decoded, "category": unit.category,
+                "source_crop": evidence.get(unit.id),
+                "target_in_source_crop": unit.review_target_bbox.__dict__ if unit.review_target_bbox else None,
+                **unit.quality_review,
+            } for unit in typed],
+        }
+        (result_dir / "quality_review.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        if include_debug:
+            (result_dir / "quality_review_raw.json").write_text(
+                json.dumps(redact_sensitive(sorted(raw_batches, key=lambda item: item["batch"]),
+                                            self.settings.trustedrouter_api_key, omit_images=True),
+                           ensure_ascii=False, indent=2), encoding="utf-8",
+            )
+        return summary, warnings
 
     async def _decode_unit(self, unit, semaphore: asyncio.Semaphore) -> None:
         if unit.category == "figure":
@@ -184,10 +287,11 @@ class Hand2TeXPipeline:
             if should_rescue and self.rescue.available:
                 try:
                     rr = await self.rescue.decode(Path(unit.crop_path), unit.category)
+                    # A returned candidate was billed even if we reject it.
+                    unit.usage_events.append({"provider": "qwen_rescue", **(rr.usage or {})})
                     rescue_score = validate(unit.category, rr.text)
                     if rescue_score >= unit.validation_score:
                         unit.decoded = rr.text
-                        unit.usage_events.append({"provider": "qwen_rescue", **(rr.usage or {})})
                         unit.decoder = f"qwen-rescue:{unit.category}"
                         unit.validation_score = rescue_score
                         unit.rescued = True
@@ -316,6 +420,14 @@ class Hand2TeXPipeline:
             )
             pl.units = build_processing_units(blocks, page.width, page.height, page.index)
             materialize_crops(pl, page_crop_dir)
+            if self.settings.enable_content_review:
+                review_crops = materialize_review_crops(pl, page_crop_dir / "review")
+                for unit in pl.units:
+                    crop = review_crops.get(unit.id)
+                    if crop:
+                        unit.review_crop_path = crop.path
+                        unit.review_source_bbox = crop.source_bbox
+                        unit.review_target_bbox = crop.target_bbox
             for unit in pl.units:
                 source_id = next((identifier for identifier in unit.member_ids if identifier in figure_crops), None)
                 if source_id:
@@ -328,7 +440,12 @@ class Hand2TeXPipeline:
         await asyncio.gather(*(self._decode_unit(unit, semaphore) for p in layout.pages for unit in p.units))
 
         all_units = [u for p in layout.pages for u in p.units]
-        missing_units = [unit for unit in all_units if unit.category in {"text", "math", "table"} and not unit.decoded.strip()]
+        review_summary, review_warnings = await self._review_document(
+            layout, result_dir, layout_usage_events, semaphore, include_debug,
+        )
+        content_warnings.extend(review_warnings)
+        missing_units = [unit for unit in all_units if unit.category in {"text", "math", "table"}
+                         and not unit.decoded.strip() and not unit.quality_review.get("merged_into")]
         content_warnings.extend({"page": unit.page, "stage": "ocr", "unit": unit.id, "warning": "This content region could not be transcribed; original source attached separately."} for unit in missing_units)
         source_pages = []
         warned_pages = {item["page"] for item in content_warnings} | {page.index for page in layout.pages if page.detector_quality == 0}
@@ -360,16 +477,19 @@ class Hand2TeXPipeline:
                     "category": u.category,
                     "decoder": u.decoder,
                     "validation": u.validation_score,
+                    "validation_kind": "structure",
+                    "quality_review": u.quality_review,
                     "rescued": u.rescued,
                 }
                 for u in all_units
             ],
             "cost_estimate": estimate_cost(self.settings, all_units, mistral_pages, layout_usage_events),
+            "content_review": review_summary,
             "detector_errors": detector_errors,
             "content_warnings": content_warnings,
             "source_pages": source_pages,
             "output_mode": "flow-document",
-            "architecture": "TrustedRouter Qwen-VL-OCR layout -> compact grouped OCR crops and local illustration crops -> category OCR -> Qwen3.8 Max rescue -> reading order -> standard flowing LaTeX document",
+            "architecture": "TrustedRouter Qwen-VL-OCR layout -> compact grouped OCR -> native category OCR and syntax rescue -> bounded original-source content review -> reading order -> standard flowing LaTeX document",
         }
         (result_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
         (result_dir / "layout.json").write_text(json.dumps(layout.to_jsonable(work_dir), ensure_ascii=False, indent=2), encoding="utf-8")
@@ -382,8 +502,11 @@ class Hand2TeXPipeline:
                         "category": u.category,
                         "bbox": u.bbox.__dict__,
                         "decoded": u.decoded,
+                        "raw_decoded": u.raw_decoded,
+                        "quality_review": u.quality_review,
                         "decoder": u.decoder,
                         "validation": u.validation_score,
+                        "validation_kind": "structure",
                     }
                     for u in all_units
                 ],

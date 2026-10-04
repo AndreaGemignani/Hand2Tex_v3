@@ -28,6 +28,7 @@ def settings():
         trustedrouter_api_key=API_KEY,
         layout_backend="qwen",
         enable_qwen_rescue=False,
+        enable_content_review=False,
         enable_mistral_layout_rescue=False,
         jev_enabled=False,
     )

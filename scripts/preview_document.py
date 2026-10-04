@@ -53,6 +53,8 @@ def main() -> None:
         unit("end", "text", "The next paragraph follows the illustration. Extra content continues on later pages "
              "without being scaled to match a handwritten bounding box.", 1100, 80),
     ])
+    page.units[2].quality_review = {"status": "uncertain", "issues": ["Synthetic ambiguous symbol"]}
+    page.units[-1].quality_review = {"status": "not_reviewed", "mark_pdf": True}
     tex = build_tex(DocumentLayout([page]), args.output / "document", "Clean notes")
     compiled = compile_pdf(tex)
     if not compiled["ok"]:

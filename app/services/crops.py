@@ -1,11 +1,20 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from pathlib import Path
+from statistics import median
 
 from PIL import Image, ImageDraw
 
-from app.models import PageLayout
+from app.models import BBox, PageLayout, ProcessingUnit
+
+
+@dataclass(frozen=True)
+class ReviewCrop:
+    path: str
+    source_bbox: BBox
+    target_bbox: BBox
 
 
 def _line_quad(polygon: list[float], width: int, height: int) -> list[tuple[float, float]] | None:
@@ -180,3 +189,71 @@ def materialize_crops(page: PageLayout, out_dir: Path, padding_px: int = 8) -> N
             path = out_dir / f"{unit.id}.png"
             crop.save(path, format="PNG", optimize=True)
             unit.crop_path = str(path)
+
+
+def _review_line_height(unit: ProcessingUnit, width: int, height: int) -> float:
+    """Estimate stroke-line height independently of a slanted axis envelope."""
+    heights = []
+    polygons = getattr(unit, "polygons", [])
+    if isinstance(polygons, (list, tuple)):
+        for polygon in polygons:
+            points = _line_quad(polygon, width, height)
+            if points is None:
+                continue
+            opposite_edges = [
+                (math.dist(points[0], points[1]) + math.dist(points[2], points[3])) / 2,
+                (math.dist(points[1], points[2]) + math.dist(points[3], points[0])) / 2,
+            ]
+            heights.append(min(opposite_edges))
+    return median(heights) if heights else unit.bbox.height
+
+
+def materialize_review_crops(page: PageLayout, out_dir: Path, padding_px: int = 8) -> dict[str, ReviewCrop]:
+    """Keep source geometry for semantic review, separate from compact OCR input.
+
+    Reviewers see the unwarped source envelope and a little surrounding context.
+    Nothing is masked, resized, deskewed or packed: fractions, matrices and mixed
+    prose/formulas retain their source positions. Target coordinates identify the
+    assigned content inside the crop so adjacent context is not transcribed twice.
+    Existing processing-unit geometry and primary crop paths remain unchanged.
+    """
+    reviews: dict[str, ReviewCrop] = {}
+    try:
+        source = Image.open(page.image_path)
+    except (OSError, ValueError):
+        return reviews
+    with source:
+        image = source.convert("RGB")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        for unit in page.units:
+            if unit.category not in {"text", "math", "table"}:
+                continue
+            coordinates = (unit.bbox.x1, unit.bbox.y1, unit.bbox.x2, unit.bbox.y2)
+            if not all(isinstance(value, (int, float)) and math.isfinite(value) for value in coordinates):
+                continue
+            target = unit.bbox.clamp(image.width, image.height)
+            if target.width <= 0 or target.height <= 0:
+                continue
+            line_height = _review_line_height(unit, image.width, image.height)
+            # One source line plus room for superscripts or a fraction denominator.
+            # Caps keep unrelated neighboring rows/columns out of remote review.
+            context = max(0.0, float(padding_px), line_height * 1.25)
+            pad_x = min(context, image.width * .04)
+            pad_y = min(context, image.height * .04)
+            left = max(0, math.floor(target.x1 - pad_x))
+            top = max(0, math.floor(target.y1 - pad_y))
+            right = min(image.width, math.ceil(target.x2 + pad_x))
+            bottom = min(image.height, math.ceil(target.y2 + pad_y))
+            if right <= left or bottom <= top:
+                continue
+            path = out_dir / f"{unit.id}_review.png"
+            try:
+                image.crop((left, top, right, bottom)).save(path, format="PNG", optimize=True)
+            except (OSError, ValueError):
+                continue
+            reviews[unit.id] = ReviewCrop(
+                path=str(path),
+                source_bbox=BBox(left, top, right, bottom),
+                target_bbox=BBox(target.x1 - left, target.y1 - top, target.x2 - left, target.y2 - top),
+            )
+    return reviews

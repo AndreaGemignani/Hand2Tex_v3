@@ -89,6 +89,11 @@ class ProcessingUnit:
     usage_events: list[dict[str, Any]] = field(default_factory=list)
     hint_text: str = ""
     polygons: list[list[float]] = field(default_factory=list)
+    review_crop_path: str = ""
+    review_source_bbox: BBox | None = None
+    review_target_bbox: BBox | None = None
+    raw_decoded: str = ""
+    quality_review: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

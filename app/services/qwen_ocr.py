@@ -57,7 +57,9 @@ def _clean_json_text(text: str) -> str:
 DECODE_PROMPTS = {
     "text": (
         "Transcribe all visible handwritten or printed text exactly. Preserve line breaks. "
-        "Do not summarize, correct, translate, or add commentary. Output only the transcription."
+        "Preserve prose, conditions and headings alongside mathematics. Write inline formulas inside $...$ "
+        "and standalone formulas inside $$...$$ with valid LaTeX. Never replace a mixed paragraph by formulas alone. "
+        "Do not summarize, solve, translate, or invent missing content. Output only the transcription."
     ),
     "math": (
         "Convert every visible mathematical expression to valid LaTeX. Preserve the exact mathematics. "
@@ -213,6 +215,7 @@ class QwenOCRClient:
     def __init__(self, settings: Settings, transport: httpx.AsyncBaseTransport | None = None):
         self.settings = settings
         self.transport = transport
+        self._native_tasks_supported: bool | None = None
 
     @property
     def available(self) -> bool:
@@ -255,6 +258,32 @@ class QwenOCRClient:
         except Exception as exc:
             raise QwenOCRError(f"TrustedRouter returned non-JSON response: {response.text[:800]}") from exc
 
+    async def _post_task(self, payload: dict[str, Any], task: str, diagnostics: LayoutTrace | None = None) -> dict[str, Any]:
+        payload = dict(payload)
+        if self._native_tasks_supported is not False:
+            payload["ocr_options"] = {"task": task}
+        else:
+            # Layout builds a native-task payload too. Once the gateway rejected
+            # that field, remove it for every subsequent layout/decoder call.
+            payload.pop("ocr_options", None)
+        try:
+            raw = await self._post(payload, diagnostics)
+        except QwenOCRError as exc:
+            message = str(exc).lower()
+            unsupported = (any(code in message for code in (" 400:", " 404:", " 422:"))
+                           and "ocr_options" in message
+                           and any(word in message for word in ("unsupported", "unknown", "unrecognized", "not allowed", "extra")))
+            if "ocr_options" not in payload or not unsupported:
+                raise
+            # Cache gateway negotiation: do not pay the latency of the same
+            # unsupported-field request for every formula/text crop on a page.
+            self._native_tasks_supported = False
+            payload.pop("ocr_options")
+            return await self._post(payload, diagnostics)
+        if "ocr_options" in payload:
+            self._native_tasks_supported = True
+        return raw
+
     async def decode(self, image_path: Path, category: str) -> DecodeResult:
         if not self.available:
             raise QwenOCRError("TRUSTEDROUTER_API_KEY is not configured")
@@ -274,14 +303,15 @@ class QwenOCRClient:
             "max_tokens": 4096,
             "provider": self._provider(),
         }
-        raw = await self._post(payload)
+        task = {"text": "document_parsing", "math": "formula_recognition", "table": "table_parsing"}[category]
+        raw = await self._post_task(payload, task)
         return DecodeResult(text=_extract_text(raw), usage=raw.get("usage") or {}, raw=raw)
 
     async def locate_text_lines(self, image_path: Path, *, diagnostics: LayoutTrace | None = None) -> LocateResult:
         """Use the same Qwen-VL-OCR model via TrustedRouter to recover layout boxes.
 
         The gateway may return native JSON or a position-only CSV listing.
-        Drawings are intentionally omitted and later preserved as the residual layer.
+        Drawings are intentionally omitted and later preserved as local image crops.
         """
         if not self.available:
             raise QwenOCRError("TRUSTEDROUTER_API_KEY is not configured")
@@ -303,14 +333,7 @@ class QwenOCRClient:
             # documented fixed prompt, which returns a `pos_list` fallback.
             "ocr_options": {"task": "advanced_recognition"},
         }
-        try:
-            raw = await self._post(payload, diagnostics)
-        except QwenOCRError as exc:
-            if any(code in str(exc) for code in (" 400:", " 404:", " 422:")):
-                payload.pop("ocr_options", None)
-                raw = await self._post(payload, diagnostics)
-            else:
-                raise
+        raw = await self._post_task(payload, "advanced_recognition", diagnostics)
 
         # First prefer provider-native advanced-recognition payloads. TrustedRouter
         # may preserve an `ocr_result.words_info` object instead of serializing it

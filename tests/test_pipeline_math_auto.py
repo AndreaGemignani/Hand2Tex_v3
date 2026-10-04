@@ -112,3 +112,18 @@ async def test_mixed_prose_and_formulas_remain_text_without_math_ocr(tmp_path):
     assert "Queste parole devono rimanere nel documento" in tex
     assert "F=ma" in tex and "a=F/m" in tex
     assert r"\displaystyle" not in tex
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prose", [
+    r"Attenzione: $C_L=0.58$ e $\sigma=1/\sqrt{3}$.",
+    r"Usa $C_L=0.58$; $\tau=\sigma/\sqrt{3}$.",
+    r"Attenzione $\frac{1}{\sqrt{3}}$: $C_L=0.58$.",
+])
+async def test_short_instruction_with_formulas_is_never_replaced_by_math_only_ocr(tmp_path, prose):
+    unit, calls = await decode_position_only_crop(tmp_path, prose)
+    assert calls == ["text"]
+    assert unit.category == "text"
+    assert unit.decoded == prose
+    assert unit.decoder == "qwen-ocr:text"
+    assert len(unit.usage_events) == 1

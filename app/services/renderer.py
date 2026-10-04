@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 from app.models import DocumentLayout, PageLayout, ProcessingUnit
@@ -19,6 +20,7 @@ _CONTENT_MATH = re.compile(
 )
 _LIST_ITEM = re.compile(r"^\s*(?:([-*•])\s+|(\d+)[.)]\s+)(.+)$")
 _HEADING = re.compile(r"^\s*(#{1,6})\s+(.+)$")
+_REVIEW_NOTE = "Trascrizione da verificare sull’originale."
 
 
 def escape_tex(text: str) -> str:
@@ -67,11 +69,20 @@ def clean_math(text: str) -> str:
     return value.strip()
 
 
-def render_text(content: str) -> str:
-    """Soft-wrap OCR lines into prose and keep explicit semantic formatting."""
+def _text_source(content: str) -> str:
     value = content.strip().replace("\r\n", "\n").replace("\r", "\n")
     value = re.sub(r"^\x60{3}(?:markdown|text|latex|tex)?\s*\n", "", value, flags=re.I)
-    value = re.sub(r"\n\s*\x60{3}$", "", value)
+    return re.sub(r"\n\s*\x60{3}$", "", value)
+
+
+def _review_note_tex(note: str) -> str:
+    return r"{\small\itshape [" + escape_tex(note) + "]}"
+
+
+def render_text(content: str, *, review_notes: dict[str, str] | None = None) -> str:
+    """Soft-wrap OCR lines into prose and keep explicit semantic formatting."""
+    value = _text_source(content)
+    notes = review_notes or {}
     formulas: dict[str, str] = {}
 
     def protect_math(match: re.Match[str]) -> str:
@@ -104,10 +115,17 @@ def render_text(content: str) -> str:
     def inline(source: str) -> str:
         result: list[str] = []
         position = 0
-        for match in re.finditer(r"\x00M\d+\x00|\*\*([^*\n]+)\*\*", source):
+        for match in re.finditer(r"\x00[MR]\d+\x00|\*\*([^*\n]+)\*\*", source):
             result.append(escape_tex(source[position:match.start()]))
             token = match.group(0)
-            result.append(formulas[token] if token in formulas else r"\textbf{" + inline(match.group(1)) + "}")
+            if token in formulas:
+                result.append(formulas[token])
+            elif token in notes:
+                result.append(_review_note_tex(notes[token]))
+            elif match.group(1) is not None:
+                result.append(r"\textbf{" + inline(match.group(1)) + "}")
+            else:
+                result.append(escape_tex(token))
             position = match.end()
         result.append(escape_tex(source[position:]))
         return "".join(result)
@@ -168,6 +186,15 @@ def _source_background(unit: ProcessingUnit, page: PageLayout) -> bool:
     )
 
 
+def _merged_into_review(unit: ProcessingUnit) -> bool:
+    return bool(unit.quality_review.get("merged_into"))
+
+
+def _review_note(unit: ProcessingUnit) -> str:
+    metadata = unit.quality_review
+    return _REVIEW_NOTE if metadata.get("status") == "uncertain" or metadata.get("mark_pdf") is True else ""
+
+
 def _figure(unit: ProcessingUnit, page: PageLayout) -> str:
     if not unit.crop_path:
         return ""
@@ -184,21 +211,32 @@ def _figure(unit: ProcessingUnit, page: PageLayout) -> str:
 def _render_document(pages: list[PageLayout]) -> str:
     blocks: list[str] = []
     prose = ""
+    review_notes: dict[str, str] = {}
     previous: ProcessingUnit | None = None
     previous_page: int | None = None
 
     def flush() -> None:
         nonlocal prose, previous, previous_page
         if prose.strip():
-            blocks.append(render_text(prose))
+            blocks.append(render_text(prose, review_notes=review_notes))
+        review_notes.clear()
         prose, previous, previous_page = "", None, None
 
-    ordered = [(page, unit) for page in sorted(pages, key=lambda page: page.index) for unit in reading_order(page)]
+    ordered = [
+        (page, unit)
+        for page in sorted(pages, key=lambda page: page.index)
+        for unit in reading_order(replace(page, units=[unit for unit in page.units if not _merged_into_review(unit)]))
+    ]
     for page, unit in ordered:
         if _source_background(unit, page):
             continue
         if unit.category in {"text", "unknown"}:
-            content = unit.decoded.strip()
+            content = _text_source(unit.decoded)
+            note = _review_note(unit)
+            if note:
+                token = f"\x00R{len(review_notes)}\x00"
+                review_notes[token] = note
+                content += (" " if content else "") + token
             if not content:
                 continue
             if prose:
@@ -224,6 +262,8 @@ def _render_document(pages: list[PageLayout]) -> str:
                 blocks.append(_figure(unit, page))
         elif unit.category == "figure":
             blocks.append(_figure(unit, page))
+        if unit.category in {"math", "table"} and (note := _review_note(unit)):
+            blocks.append(_review_note_tex(note))
     flush()
     return "\n\n".join(block for block in blocks if block)
 
@@ -234,7 +274,8 @@ def build_tex(layout: DocumentLayout, output_dir: Path, title: str) -> Path:
     assets = output_dir / "assets"
     for page in layout.pages:
         for unit in page.units:
-            if unit.category not in {"figure", "table"} or not unit.crop_path or _source_background(unit, page):
+            if (unit.category not in {"figure", "table"} or not unit.crop_path
+                    or _source_background(unit, page) or _merged_into_review(unit)):
                 continue
             src = Path(unit.crop_path)
             if not src.is_absolute() and (output_dir / src).is_file():

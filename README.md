@@ -1,18 +1,43 @@
-# Hand2TeX V2.14 DEBUG — TrustedRouter
+# Hand2TeX V2.15 DEBUG — TrustedRouter
 
 Convert handwritten notes into a normal, editable LaTeX document: paragraphs, formulas, tables and original drawings in reading order, with regular margins and typography.
 
-Pipeline: **DETECT → PACK → DECODE → COMPOSE**.
+Pipeline: **DETECT → PACK → DECODE → REVIEW → COMPOSE**.
 
 The selected models are unchanged:
 
 - **Qwen-VL-OCR** for layout, text, formulas/matrices and tables.
-- **Qwen3.8 Max** only as rescue for low-confidence decoding.
+- **Qwen3.8 Max** for image-based content review of all transcribed regions, enabled by default, and as rescue for structurally invalid decoding.
 - Drawings/figures are preserved as original pixels and inserted into the document as images.
 - Detected geometry helps isolate and pack OCR crops, determine reading order and retain broad structural relationships. It does not fix the output text to scan coordinates.
 - LaTeX lays out the decoded content naturally, with normal paragraphs, inline or displayed mathematics, tables and figures.
 
-Qwen calls go through the OpenAI-compatible **TrustedRouter** gateway. Provider, models and request prompts are unchanged.
+Qwen calls go through the OpenAI-compatible **TrustedRouter** gateway. The existing models are retained, with Qwen3.8 Max now also checking transcription against the source image before composition.
+
+## V2.15: verify the content against the scan
+
+The captured V2.14 result compiled successfully but contained incorrect words, changed mathematical coefficients and an invented matrix. Every region received a structural score of `1.0`; those scores check text or LaTeX syntax and are not confidence estimates of transcription accuracy.
+
+Content review now checks every typed region against an image crop with nearby source context, in bounded batches. The reviewer can recover mixed prose and mathematics, preserve headings and report uncertain readings. Corrections must be supported by the visible handwriting: the task is transcription, not rewriting the author's ideas, fixing their mathematics or completing missing material from subject knowledge. Uncertain or failed reviews are reported and the original page is attached separately for inspection.
+
+Uncertain regions carry the visible note “Trascrizione da verificare sull’originale.” beside their content in the PDF. Regions combined into a reviewed expression are printed once; their original OCR remains in the diagnostic records. Verified content continues through normal paragraphs without added notes.
+
+`decoded.json` retains the original OCR and reviewed result. `quality_review.json` records review decisions and changes so the content can be checked without repeating the conversion. Review uses additional API calls; the cost estimate includes reported token usage from all review responses, including responses rejected as invalid, rather than only accepted corrections. An image-based review can still make mistakes; its accuracy needs to be assessed on the next real conversion.
+
+The [documented native OCR tasks](https://www.alibabacloud.com/help/en/model-studio/qwen-vl-ocr-api-reference) are forwarded through TrustedRouter when supported, with a compatible prompt-based fallback if the gateway rejects them. The final document keeps the normal flowing LaTeX layout introduced in V2.14.
+
+Content review settings:
+
+```text
+ENABLE_CONTENT_REVIEW=true
+CONTENT_REVIEW_MODEL=qwen/qwen3.8-max
+CONTENT_REVIEW_BATCH_SIZE=6
+CONTENT_REVIEW_MAX_PIXELS=3000000
+CONTENT_REVIEW_MAX_INPUT_CHARS=12000
+CONTENT_REVIEW_MAX_OUTPUT_TOKENS=4096
+```
+
+When `CONTENT_REVIEW_MODEL` is unset, review uses `QWEN_RESCUE_MODEL`. Set `ENABLE_CONTENT_REVIEW=false` to disable this extra review stage. The limits bound each review request's image pixels, supplied text and generated response.
 
 ## V2.14: a standard flowing document
 
@@ -105,7 +130,7 @@ No Alibaba region, workspace ID or DashScope key is required.
 
 ## Output
 
-Each successful conversion ZIP contains the typeset `main.pdf`, editable `main.tex`, `layout.json`, `decoded.json`, `manifest.json`, preserved drawing assets and `compile.log`. The LaTeX source contains the decoded content in document order; layout coordinates remain available as diagnostic metadata.
+Each successful conversion ZIP contains the typeset `main.pdf`, editable `main.tex`, `layout.json`, `decoded.json`, `manifest.json`, `quality_review.json`, preserved drawing assets and `compile.log`. With content review enabled, `review_crops/` contains the original context crops used as evidence; debug output also includes sanitized `quality_review_raw.json`. If review is disabled, its report explicitly records that no content verification was performed. The LaTeX source contains the final content in document order; layout coordinates remain available as diagnostic metadata.
 
 When a conversion has warnings, `manifest.json` lists `content_warnings` and `source_pages`. Original pages in `sources/` are review attachments and are not inserted as page backgrounds or substitutes for transcribed content.
 
@@ -114,10 +139,10 @@ When a conversion has warnings, `manifest.json` lists `content_warnings` and `so
 ## Local test
 
 ```bash
-docker build -t hand2tex-v214 .
+docker build -t hand2tex-v215 .
 docker run --rm -p 8000:10000 \
   -e TRUSTEDROUTER_API_KEY='YOUR_KEY' \
-  hand2tex-v214
+  hand2tex-v215
 ```
 
 ## Tests

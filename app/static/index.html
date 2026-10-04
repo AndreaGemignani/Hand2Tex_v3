@@ -19,9 +19,9 @@ button{width:100%;font-size:1rem;margin-top:18px}button:disabled{opacity:.55}.fi
 <body>
 <main>
 <section class="hero">
-<span class="pill">V2.14 · Documento LaTeX standard</span>
+<span class="pill">V2.15 · Trascrizione e verifica del contenuto</span>
 <h1>{{APP_NAME}}</h1>
-<p class="sub">Trasforma appunti scritti a mano, scansioni o esportazioni da tablet in un documento scritto al computer. Testo, formule e tabelle seguono l'ordine di lettura, con margini e impaginazione regolari. I disegni originali sono inseriti nel documento come immagini.</p>
+<p class="sub">Trasforma appunti scritti a mano, scansioni o esportazioni da tablet in un documento scritto al computer. La verifica confronta la trascrizione con l'immagine originale. Testo, formule e tabelle seguono l'ordine di lettura, con margini e impaginazione regolari; i disegni sono inseriti come immagini.</p>
 </section>
 <section class="card">
 <form id="form">
@@ -35,7 +35,7 @@ button{width:100%;font-size:1rem;margin-top:18px}button:disabled{opacity:.55}.fi
 <label class="checks"><input id="debug" type="checkbox" {{DEBUG_CHECKED}} /> Includi dati di diagnostica nello ZIP</label>
 <button id="submit" type="submit">Crea documento LaTeX + PDF</button>
 <div id="status" class="status"></div>
-<div class="hint">Lo ZIP contiene il PDF impaginato, il sorgente LaTeX modificabile, i disegni conservati e i dati di diagnostica. Il riconoscimento dei blocchi serve a ordinare il contenuto e preparare i ritagli per la trascrizione.</div>
+<div class="hint">Lo ZIP contiene il PDF impaginato, il sorgente LaTeX modificabile, i disegni e i dati della verifica. Le parti incerte sono segnalate anche nel PDF, così puoi controllarle sulla scansione originale.</div>
 </form>
 </section>
 </main>
@@ -47,7 +47,7 @@ form.addEventListener('submit',async e=>{
   e.preventDefault();
   if(!files.files.length)return;
   submit.disabled=true;
-  status.textContent='Riconoscimento del contenuto, trascrizione e impaginazione del documento…';
+  status.textContent='Riconoscimento, trascrizione, verifica del contenuto e impaginazione…';
   const fd=new FormData();
   [...files.files].forEach(f=>fd.append('files',f));
   fd.append('title',document.getElementById('title').value);

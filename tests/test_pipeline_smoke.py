@@ -49,7 +49,7 @@ async def test_pipeline_harmony(monkeypatch, tmp_path):
     canvas = Image.new("RGB", (1000,1400), "white")
     d = ImageDraw.Draw(canvas); d.rectangle((520,50,900,420), outline="black", width=4)
     canvas.save(img)
-    pipeline = Hand2TeXPipeline(Settings(), FakeDetector(), FakeQwen(), FakeRescue(), FakeMistral(), FakeJev())
+    pipeline = Hand2TeXPipeline(Settings(enable_content_review=False), FakeDetector(), FakeQwen(), FakeRescue(), FakeMistral(), FakeJev())
     result = await pipeline.run([img], tmp_path / "work", "Integration")
     result_dir = result["result_dir"]
     assert (result_dir / "main.pdf").exists()
@@ -80,7 +80,7 @@ async def test_qwen_layout_render_free_path(monkeypatch, tmp_path):
     d = ImageDraw.Draw(canvas)
     d.rectangle((600, 300, 900, 600), outline="black", width=4)
     canvas.save(img)
-    pipeline = Hand2TeXPipeline(Settings(), None, FakeQwenLayout(), FakeRescue(), FakeMistral(), FakeJev())
+    pipeline = Hand2TeXPipeline(Settings(enable_content_review=False), None, FakeQwenLayout(), FakeRescue(), FakeMistral(), FakeJev())
     result = await pipeline.run([img], tmp_path / "work_qwen", "Qwen Layout")
     result_dir = result["result_dir"]
     assert (result_dir / "main.pdf").exists()

@@ -136,7 +136,7 @@ async def test_pipeline_preserves_local_drawing_and_keeps_full_scan_outside_tex(
 
     path, _ = save_page(tmp_path, content)
     monkeypatch.setattr(pipeline_module, "compile_pdf", lambda tex_path: {"ok": True, "reason": None})
-    settings = Settings(trustedrouter_api_key="test", enable_qwen_rescue=False, enable_mistral_layout_rescue=False, jev_enabled=False)
+    settings = Settings(trustedrouter_api_key="test", enable_qwen_rescue=False, enable_content_review=False, enable_mistral_layout_rescue=False, jev_enabled=False)
     result = await Hand2TeXPipeline(settings, qwen=LocatedQwen("")).run([path], tmp_path / "work", "Drawing")
     layout = json.loads((result["result_dir"] / "layout.json").read_text(encoding="utf-8"))
     figures = [unit for unit in layout["pages"][0]["units"] if unit["category"] == "figure"]
@@ -160,7 +160,7 @@ async def test_no_layout_attempts_transcription_and_attaches_source_outside_docu
 
     monkeypatch.setattr(pipeline_module, "compile_pdf", compiled)
     client = NoLayoutQwen(transcription)
-    settings = Settings(trustedrouter_api_key="test", enable_qwen_rescue=False, enable_mistral_layout_rescue=False, jev_enabled=False)
+    settings = Settings(trustedrouter_api_key="test", enable_qwen_rescue=False, enable_content_review=False, enable_mistral_layout_rescue=False, jev_enabled=False)
     result = await Hand2TeXPipeline(settings, qwen=client).run([path], tmp_path / "work", "Fallback")
     assert len(client.calls) == 1 and client.calls[0][1] == "text"
     manifest = result["manifest"]
