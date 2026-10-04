@@ -1,3 +1,5 @@
+#NOTA PER ME molto difficile avere un output pulito come se fosse stato scritto al computer, problemi di interpretazione testo e formule risultano in parole prive di senso, l'obiettivo dell'app era creare una versione di mathpix con modelli ai potenti e tagliare i costi sull'aggregazione prima della chiamata api, test fallito miseramente, congratulazioni a mathpix
+
 # Hand2TeX V2.15 DEBUG — TrustedRouter
 
 Convert handwritten notes into a normal, editable LaTeX document: paragraphs, formulas, tables and original drawings in reading order, with regular margins and typography.
